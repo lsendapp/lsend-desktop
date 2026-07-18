@@ -74,8 +74,8 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key>            <string>lsend</string>
-  <key>CFBundleDisplayName</key>     <string>lsend</string>
+  <key>CFBundleName</key>            <string>LSend</string>
+  <key>CFBundleDisplayName</key>     <string>LSend</string>
   <key>CFBundleExecutable</key>      <string>lsend-desktop</string>
   <key>CFBundleIdentifier</key>      <string>app.lsend.desktop</string>
   <key>CFBundleVersion</key>         <string>0.1.0</string>

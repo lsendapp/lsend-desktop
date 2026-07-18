@@ -8,6 +8,7 @@ use tray_icon::Icon;
 use tray_icon::TrayIcon;
 use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
+use crate::APP_DISPLAY_NAME;
 use lsend_core::config::AppConfig;
 use lsend_core::discovery::DiscoveredDevice;
 
@@ -155,9 +156,10 @@ pub fn build_menu(
         }
     }
     menu.append(&PredefinedMenuItem::separator())?;
+    let quit_label = format!("Quit {APP_DISPLAY_NAME}");
     menu.append(&MenuItem::with_id(
         MenuId::new(ID_QUIT),
-        "Quit lsend",
+        &quit_label,
         true,
         None,
     ))?;

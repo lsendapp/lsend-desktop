@@ -38,7 +38,8 @@ use crate::receiver::ReceiverHandle;
 use crate::state::{AppState, UiEvent};
 use crate::tray::{ReceiverStatus, TrayAction};
 
-const APP_NAME: &str = "lsend";
+/// User-facing product name in tray UI, notifications, and the macOS bundle.
+pub const APP_DISPLAY_NAME: &str = "LSend";
 #[cfg(target_os = "macos")]
 const MACOS_BUNDLE_ID: &str = "app.lsend.desktop";
 
@@ -53,7 +54,7 @@ const MACOS_BUNDLE_ID: &str = "app.lsend.desktop";
 /// Truncation: tray-icon tooltips are typically clipped at ~64 chars on
 /// macOS/Windows; the alias is small enough that we don't worry.
 fn tray_tooltip_text(alias: &str) -> String {
-    format!("{alias} · {APP_NAME}")
+    format!("{alias} · {APP_DISPLAY_NAME}")
 }
 
 fn main() -> Result<()> {
@@ -98,7 +99,7 @@ fn main() -> Result<()> {
     // Reusable pieces for the closure.
     let icon = tray::build_icon()?;
     let initial_menu = tray::build_menu(&[], ReceiverStatus::Starting, &app.config.alias, false)?;
-    // Tooltip: "{alias} · lsend" — the alias is the LocalSend device name
+    // Tooltip: "{alias} · LSend" — the alias is the LocalSend device name
     // peers will see and the user can recognise across multiple instances.
     let tooltip = tray_tooltip_text(&app.config.alias);
     let mut tray_builder = TrayIconBuilder::new()
@@ -580,7 +581,11 @@ fn copy_last_message(last_message: &Arc<Mutex<Option<String>>>) {
 }
 
 fn notify_status(body: &str) {
-    if let Err(e) = Notification::new().summary("lsend").body(body).show() {
+    if let Err(e) = Notification::new()
+        .summary(APP_DISPLAY_NAME)
+        .body(body)
+        .show()
+    {
         tracing::warn!("notification failed: {e}");
     }
 }
@@ -593,7 +598,7 @@ fn notify_block(summary: &str, body: &str) {
 
 fn notify_error(body: &str) {
     if let Err(e) = Notification::new()
-        .summary("lsend — error")
+        .summary("LSend — error")
         .body(body)
         .show()
     {
