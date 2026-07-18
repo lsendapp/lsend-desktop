@@ -12,7 +12,6 @@ use lsend_core::discovery::DiscoveredDevice;
 use lsend_core::events::ReceiveEvent;
 use lsend_core::identity::Identity;
 
-
 /// State owned by the tao event loop. Cloning is cheap: the heavy fields are
 /// behind an `Arc` so background tasks can hold a reference.
 #[derive(Clone)]
@@ -47,9 +46,14 @@ pub enum UiEvent {
     Receive(ReceiveEvent),
     /// The background scan loop refreshed `AppState::devices` (or scan
     /// errored — check `err`).
-    DevicesRefreshed { err: Option<String> },
+    DevicesRefreshed {
+        err: Option<String>,
+    },
     /// The resident listener failed to start (port in use, etc.) or stopped
     /// unexpectedly. Carries a human-readable reason for the tray status.
     ReceiverError(String),
+    /// A requested receiver shutdown has completed and the listening port is
+    /// available for a subsequent resume.
+    ReceiverStopped,
     SendResult(std::result::Result<String, String>),
 }

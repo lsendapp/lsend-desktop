@@ -21,7 +21,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PROFILE="${1:-release}"
+REQUESTED_PROFILE="${1:-release}"
+PROFILE="$REQUESTED_PROFILE"
 
 # Validate profile before doing any work.
 case "$PROFILE" in
@@ -36,6 +37,14 @@ if [ "$PROFILE" = "run" ]; then
   PROFILE="release"
 fi
 
+# Build the requested profile every time so the bundle always contains the
+# current source rather than whichever binary happened to exist already.
+if [ "$PROFILE" = "release" ]; then
+  cargo build --release --bin lsend-desktop
+else
+  cargo build --bin lsend-desktop
+fi
+
 # Locate the binary. We honour CARGO_TARGET_DIR (lets CI funnel artifacts
 # elsewhere) and fall back to the workspace target dir at the repo root,
 # which is where `cargo build --release -p lsend-desktop` puts it under a
@@ -46,11 +55,6 @@ else
   BIN_PATH="../target/$PROFILE/lsend-desktop"
 fi
 
-if [ ! -x "$BIN_PATH" ]; then
-  echo "binary not found at $BIN_PATH; running cargo build"
-  cargo build --"$PROFILE" --bin lsend-desktop
-fi
-
 BUNDLE_DIR="dist/lsend-desktop.app"
 BUNDLE_BIN_DIR="$BUNDLE_DIR/Contents/MacOS"
 BUNDLE_RES_DIR="$BUNDLE_DIR/Contents/Resources"
@@ -59,9 +63,9 @@ BUNDLE_RES_DIR="$BUNDLE_DIR/Contents/Resources"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_BIN_DIR" "$BUNDLE_RES_DIR"
 
-# Use an absolute symlink so `open` (which can chdir before exec) finds the
-# binary regardless of where the bundle lives on disk.
-ln -s "$(cd "$(dirname "$BIN_PATH")" && pwd)/$(basename "$BIN_PATH")" "$BUNDLE_BIN_DIR/lsend-desktop"
+# Copy the executable so the bundle remains self-contained when moved, when
+# the Cargo target directory is cleaned, or when the app is distributed.
+install -m 755 "$BIN_PATH" "$BUNDLE_BIN_DIR/lsend-desktop"
 
 # Minimal Info.plist. The `LSUIElement` flag is the macOS equivalent of our
 # tao `ActivationPolicy::Accessory`: hide dock icon, menu-bar only.
@@ -104,9 +108,6 @@ fi
 
 echo "Built: $BUNDLE_DIR"
 
-# `run` was normalised to `release` above; remember whether the caller asked
-# for run so we know to launch at the end.
-WANT_RUN="${1:-}"
-if [ "$WANT_RUN" = "run" ]; then
+if [ "$REQUESTED_PROFILE" = "run" ]; then
   exec open "$BUNDLE_DIR"
 fi

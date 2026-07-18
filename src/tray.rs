@@ -7,8 +7,8 @@ use tray_icon::Icon;
 use tray_icon::TrayIcon;
 use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
-use lsend_core::discovery::DiscoveredDevice;
 use lsend_core::config::AppConfig;
+use lsend_core::discovery::DiscoveredDevice;
 
 /// Stable menu IDs. Keep these short — macOS pads visible labels by the
 /// longest ID string on some systems.
@@ -35,7 +35,7 @@ pub fn build_icon() -> Result<Icon> {
         for x in 0..S {
             // Rounded corner mask: drop corner pixels where the nearest edge
             // sum is < 2 from both axes.
-            let in_corner = (x < 2 || x >= S - 2) && (y < 2 || y >= S - 2);
+            let in_corner = !(2..S - 2).contains(&x) && !(2..S - 2).contains(&y);
             let corner_diag = (x.min(S - 1 - x) as i32 + y.min(S - 1 - y) as i32) < 2;
             let color = if in_corner && corner_diag {
                 transparent
@@ -51,6 +51,16 @@ pub fn build_icon() -> Result<Icon> {
     Ok(Icon::from_rgba(rgba, S, S)?)
 }
 
+/// Current receiver lifecycle state as presented by the tray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverStatus {
+    Starting,
+    Receiving,
+    Stopping,
+    Paused,
+    Error,
+}
+
 /// Build the full tray menu for the current state.
 ///
 /// Returns `tray_icon::menu::Result` so the inner `?` operators bind to muda's
@@ -62,7 +72,7 @@ pub fn build_icon() -> Result<Icon> {
 /// this is — keeping it in sync with the tooltip set in `main.rs`.
 pub fn build_menu(
     devices: &[DiscoveredDevice],
-    receiving: bool,
+    receiver_status: ReceiverStatus,
     alias: &str,
 ) -> tray_icon::menu::Result<Menu> {
     let menu = Menu::new();
@@ -70,10 +80,12 @@ pub fn build_menu(
     // Status line: disabled item reflecting current state. The first line
     // identifies the device (the LocalSend alias peers see); the second
     // is the receiver port / paused indicator.
-    let status_text = if receiving {
-        format!("Receiving — {alias} · port 53317")
-    } else {
-        format!("Paused — {alias} (not receiving)")
+    let status_text = match receiver_status {
+        ReceiverStatus::Starting => format!("Starting — {alias}"),
+        ReceiverStatus::Receiving => format!("Receiving — {alias} · port 53317"),
+        ReceiverStatus::Stopping => format!("Pausing — {alias}"),
+        ReceiverStatus::Paused => format!("Paused — {alias} (not receiving)"),
+        ReceiverStatus::Error => format!("Receiver error — {alias}"),
     };
     let status = MenuItem::new(status_text, false, None);
     menu.append(&status)?;
@@ -82,16 +94,12 @@ pub fn build_menu(
     // "Send file to…" submenu: one entry per discovered device.
     let send_submenu = Submenu::new("Send file to…", true);
     if devices.is_empty() {
-        send_submenu.append(&MenuItem::new(
-            "(no devices nearby — refresh)",
-            false,
-            None,
-        ))?;
+        send_submenu.append(&MenuItem::new("(no devices nearby — refresh)", false, None))?;
     } else {
-        for (i, d) in devices.iter().enumerate() {
+        for d in devices {
             let label = format!("{}  ({}{})", d.alias, d.ip, port_suffix(d));
             send_submenu.append(&MenuItem::with_id(
-                MenuId::new(format!("{ID_SEND_PREFIX}{i}")),
+                MenuId::new(format!("{ID_SEND_PREFIX}{}", device_key(d))),
                 label,
                 true,
                 None,
@@ -109,20 +117,25 @@ pub fn build_menu(
 
     menu.append(&PredefinedMenuItem::separator())?;
 
-    if receiving {
-        menu.append(&MenuItem::with_id(
+    match receiver_status {
+        ReceiverStatus::Receiving => menu.append(&MenuItem::with_id(
             MenuId::new(ID_PAUSE),
             "Pause receiving",
             true,
             None,
-        ))?;
-    } else {
-        menu.append(&MenuItem::with_id(
+        ))?,
+        ReceiverStatus::Paused | ReceiverStatus::Error => menu.append(&MenuItem::with_id(
             MenuId::new(ID_RESUME),
             "Resume receiving",
             true,
             None,
-        ))?;
+        ))?,
+        ReceiverStatus::Starting => {
+            menu.append(&MenuItem::new("Starting receiver…", false, None))?
+        }
+        ReceiverStatus::Stopping => {
+            menu.append(&MenuItem::new("Pausing receiver…", false, None))?
+        }
     }
     menu.append(&MenuItem::with_id(
         MenuId::new(ID_REFRESH),
@@ -131,7 +144,12 @@ pub fn build_menu(
         None,
     ))?;
     menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&MenuItem::with_id(MenuId::new(ID_QUIT), "Quit lsend", true, None))?;
+    menu.append(&MenuItem::with_id(
+        MenuId::new(ID_QUIT),
+        "Quit lsend",
+        true,
+        None,
+    ))?;
 
     Ok(menu)
 }
@@ -145,11 +163,17 @@ fn port_suffix(d: &DiscoveredDevice) -> String {
     }
 }
 
+/// Stable identity used by menu actions. Unlike an array index, this still
+/// identifies the same peer if a scan reorders or replaces the device cache.
+pub fn device_key(d: &DiscoveredDevice) -> String {
+    format!("{}:{}:{}", d.ip, d.port, d.fingerprint)
+}
+
 /// A parsed tray menu action received from muda's event channel.
 #[derive(Debug, Clone)]
 pub enum TrayAction {
-    /// Send-to-device index in the current device list.
-    Send(usize),
+    /// Stable identity of the selected peer.
+    Send(String),
     Refresh,
     Pause,
     Resume,
@@ -166,10 +190,7 @@ pub fn parse_action(id: &str) -> TrayAction {
         ID_REFRESH => TrayAction::Refresh,
         ID_QUIT => TrayAction::Quit,
         other if other.starts_with(ID_SEND_PREFIX) => {
-            other[ID_SEND_PREFIX.len()..]
-                .parse::<usize>()
-                .map(TrayAction::Send)
-                .unwrap_or(TrayAction::Ignored)
+            TrayAction::Send(other[ID_SEND_PREFIX.len()..].to_owned())
         }
         _ => TrayAction::Ignored,
     }
@@ -179,4 +200,43 @@ pub fn parse_action(id: &str) -> TrayAction {
 /// is moved into a `Box<dyn ContextMenu>` as required by `set_menu`.
 pub fn set_tray_menu(tray: &TrayIcon, menu: Menu) {
     tray.set_menu(Some(Box::new(menu)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(ip: &str, port: u16, fingerprint: &str) -> DiscoveredDevice {
+        DiscoveredDevice {
+            alias: "Peer".to_owned(),
+            ip: ip.to_owned(),
+            port,
+            fingerprint: fingerprint.to_owned(),
+            https: true,
+            version: "2.1".to_owned(),
+            device_type: None,
+            device_model: None,
+        }
+    }
+
+    #[test]
+    fn send_action_round_trips_stable_device_key() {
+        let peer = device("192.168.1.20", 53317, "abc123");
+        let key = device_key(&peer);
+
+        match parse_action(&format!("{ID_SEND_PREFIX}{key}")) {
+            TrayAction::Send(parsed_key) => assert_eq!(parsed_key, key),
+            action => panic!("unexpected action: {action:?}"),
+        }
+    }
+
+    #[test]
+    fn device_key_distinguishes_endpoint_and_identity() {
+        let first = device("192.168.1.20", 53317, "abc123");
+        let different_port = device("192.168.1.20", 53318, "abc123");
+        let different_identity = device("192.168.1.20", 53317, "def456");
+
+        assert_ne!(device_key(&first), device_key(&different_port));
+        assert_ne!(device_key(&first), device_key(&different_identity));
+    }
 }
