@@ -40,33 +40,20 @@ use crate::tray::TrayAction;
 
 const APP_NAME: &str = "lsend";
 
-/// Resolve the current macOS/Linux user. We prefer `id -un` (POSIX) over
-/// `whoami` because `whoami` on macOS reads from `/etc/utmp` and can return a
-/// stale name if the process is launched via `open` from a different session.
-/// Falls back to the env vars `USER` / `USERNAME`, finally to `"unknown"`.
-fn current_user() -> String {
-    use std::process::Command;
-
-    if let Ok(out) = Command::new("id").arg("-un").output() {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                let name = s.trim();
-                if !name.is_empty() {
-                    return name.to_string();
-                }
-            }
-        }
-    }
-    for var in ["USER", "USERNAME"] {
-        if let Ok(v) = std::env::var(var) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_string();
-            }
-        }
-    }
-    "unknown".to_string()
+/// The LocalSend device display name (alias). Surfaced in the tray tooltip so
+/// users running multiple `lsend-desktop` instances — or one alongside the
+/// official LocalSend app — can tell whose tray icon this is at a glance.
+///
+/// Resolved once at startup from `AppConfig::alias` (which itself reads the
+/// persisted `alias.txt` under `~/.config/lsend/`). If the alias changes at
+/// runtime (`lsend alias set ...`) the change does not take effect until the
+/// app is restarted; LocalSend peers likewise re-discover on restart.
+/// Truncation: tray-icon tooltips are typically clipped at ~64 chars on
+/// macOS/Windows; the alias is small enough that we don't worry.
+fn tray_tooltip_text(alias: &str) -> String {
+    format!("{alias} · {APP_NAME}")
 }
+
 
 fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt()
@@ -120,6 +107,19 @@ fn main() -> Result<()> {
         proxy.clone(),
     );
     // Reusable pieces for the closure.
+    let icon = tray::build_icon()?;
+    let initial_menu = tray::build_menu(&[], /* receiving = */ false)?;
+    // Tooltip: "{alias} · lsend" — the alias is the LocalSend device name
+    // peers will see and the user can recognise across multiple instances.
+    let tooltip = tray_tooltip_text(&app.config.alias);
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(initial_menu))
+        .with_tooltip(tooltip)
+        .with_icon(icon)
+        .build()?;
+    let tray = Arc::new(Mutex::new(tray));
+
+    // Reusable pieces for the closure.
     let devices_ref = app.devices.clone();
     let config_ref = app.config.clone();
     let identity_ref = app.identity.clone();
@@ -131,7 +131,6 @@ fn main() -> Result<()> {
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
-
         // 1) Tray menu events (muda global channel).
         if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
             let id = menu_event.id.0.as_str().to_string();
