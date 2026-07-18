@@ -16,7 +16,7 @@ mod scanner;
 mod state;
 mod tray;
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
 
 use anyhow::Result;
 use notify_rust::Notification;
@@ -39,6 +39,8 @@ use crate::state::{AppState, UiEvent};
 use crate::tray::{ReceiverStatus, TrayAction};
 
 const APP_NAME: &str = "lsend";
+#[cfg(target_os = "macos")]
+const MACOS_BUNDLE_ID: &str = "app.lsend.desktop";
 
 /// The LocalSend device display name (alias). Surfaced in the tray tooltip so
 /// users running multiple `lsend-desktop` instances — or one alongside the
@@ -61,6 +63,7 @@ fn main() -> Result<()> {
         )
         .try_init();
 
+    configure_notifications();
     let app = AppState::load()?;
 
     // Build tao event loop with a custom user-event type so background tasks
@@ -113,6 +116,7 @@ fn main() -> Result<()> {
     let tray_ref = tray.clone();
 
     let mut receiver_status = ReceiverStatus::Starting;
+    let mut receive_notify_state = ReceiveNotifyState::default();
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -225,7 +229,11 @@ fn main() -> Result<()> {
                             &alias_ref,
                         );
                     }
-                    handle_receive_event(ev);
+                    handle_receive_event(
+                        ev,
+                        &mut receive_notify_state,
+                        &config_ref.receive_dir,
+                    );
                 }
                 UiEvent::DevicesRefreshed { .. } => {
                     rebuild_menu(
@@ -276,6 +284,16 @@ fn main() -> Result<()> {
     // unreachable dead code.
 }
 
+#[cfg(target_os = "macos")]
+fn configure_notifications() {
+    if let Err(e) = notify_rust::set_application(MACOS_BUNDLE_ID) {
+        tracing::warn!("could not register notification application: {e}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_notifications() {}
+
 /// Rebuild the tray menu from the current device cache and receiver status.
 /// Runs on the main thread; the devices lock is held briefly.
 fn rebuild_menu(
@@ -299,43 +317,114 @@ fn rebuild_menu(
     tray::set_tray_menu(&t, menu);
 }
 
-fn handle_receive_event(ev: ReceiveEvent) {
+#[derive(Default)]
+struct ReceiveNotifyState {
+    sender_alias: Option<String>,
+    saved_files: Vec<String>,
+    message_notified: bool,
+}
+
+impl ReceiveNotifyState {
+    fn reset(&mut self) {
+        self.sender_alias = None;
+        self.saved_files.clear();
+        self.message_notified = false;
+    }
+
+    fn begin_file_transfer(&mut self, sender_alias: String) {
+        self.reset();
+        self.sender_alias = Some(sender_alias);
+    }
+}
+
+fn message_preview(text: &str) -> String {
+    if text.chars().count() > 160 {
+        format!("{}…", text.chars().take(160).collect::<String>())
+    } else {
+        text.to_string()
+    }
+}
+
+fn format_saved_files(files: &[String]) -> String {
+    match files.len() {
+        0 => String::new(),
+        1 => files[0].clone(),
+        2 => format!("{} and {}", files[0], files[1]),
+        3 => format!("{}, {}, and {}", files[0], files[1], files[2]),
+        n => format!("{}, {}, and {} more", files[0], files[1], n - 2),
+    }
+}
+
+fn handle_receive_event(
+    ev: ReceiveEvent,
+    notify_state: &mut ReceiveNotifyState,
+    receive_dir: &Path,
+) {
     match ev {
         ReceiveEvent::Ready { .. } => {
             notify_status("Receiver ready on port 53317");
         }
-        ReceiveEvent::TransferStarted {
-            sender_alias,
-            file_count,
-        } => {
-            notify_status(&format!(
-                "Receiving {file_count} file(s) from {sender_alias}"
-            ));
+        ReceiveEvent::TransferStarted { sender_alias, .. } => {
+            notify_state.begin_file_transfer(sender_alias);
         }
         ReceiveEvent::MessageReceived {
             sender_alias, text, ..
         } => {
-            let preview = if text.chars().count() > 160 {
-                format!("{}…", text.chars().take(160).collect::<String>())
-            } else {
-                text
-            };
+            let preview = message_preview(&text);
             notify_block(
                 &format!("Message from {sender_alias}"),
                 &format!("{preview}\nUse the tray menu to copy the full message."),
             );
+            notify_state.message_notified = true;
+            notify_state.sender_alias = Some(sender_alias);
         }
         ReceiveEvent::FileSaved { file_name, .. } => {
-            notify_status(&format!("Saved {file_name}"));
+            notify_state.saved_files.push(file_name);
         }
         ReceiveEvent::TransferComplete => {
-            notify_status("Transfer complete");
+            if notify_state.message_notified {
+                notify_state.reset();
+                return;
+            }
+            if let Some(sender_alias) = notify_state.sender_alias.take() {
+                let files = std::mem::take(&mut notify_state.saved_files);
+                if !files.is_empty() {
+                    notify_block(
+                        &format!("File(s) from {sender_alias}"),
+                        &format!(
+                            "{}\nCheck {} for the saved file(s).",
+                            format_saved_files(&files),
+                            receive_dir.display(),
+                        ),
+                    );
+                }
+            }
+            notify_state.reset();
         }
         ReceiveEvent::TransferFinishedWithErrors => {
-            notify_error("Transfer finished with errors");
+            if notify_state.message_notified {
+                notify_state.reset();
+                return;
+            }
+            let sender_alias = notify_state
+                .sender_alias
+                .take()
+                .unwrap_or_else(|| "Unknown".to_string());
+            let files = std::mem::take(&mut notify_state.saved_files);
+            let body = if files.is_empty() {
+                "Some files could not be saved.".to_string()
+            } else {
+                format!(
+                    "{}\nSome files could not be saved. Check {} for saved file(s).",
+                    format_saved_files(&files),
+                    receive_dir.display(),
+                )
+            };
+            notify_block(&format!("File(s) from {sender_alias}"), &body);
+            notify_state.reset();
         }
         ReceiveEvent::TransferCancelled => {
-            notify_status("Transfer cancelled");
+            notify_state.reset();
         }
         ReceiveEvent::Shutdown => {
             // Supervisor will surface any error separately via ReceiverError.
