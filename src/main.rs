@@ -78,18 +78,12 @@ fn main() -> Result<()> {
     // scanner, and ad-hoc send tasks all run on it.
     let rt = Runtime::new()?;
     let rt_handle = rt.handle().clone();
-
     // Tray icon + initial menu. Wrapped in an Arc<Mutex<_>> so the event loop
     // closure (a `move`) can also rebuild the menu — `TrayIcon::set_menu`
-    // swaps without dropping the icon.
+    // swaps without dropping the icon. The initial menu is built further
+    // down, after we have the AppConfig alias available.
     let icon = tray::build_icon()?;
-    let initial_menu = tray::build_menu(&[], /* receiving = */ false)?;
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(initial_menu))
-        .with_tooltip(APP_NAME)
-        .with_icon(icon)
-        .build()?;
-    let tray = Arc::new(Mutex::new(tray));
+
 
     // Spawn resident receiver + background scanner.
     let mut rx_handle: Option<ReceiverHandle> = Some(receiver::spawn(
@@ -108,7 +102,7 @@ fn main() -> Result<()> {
     );
     // Reusable pieces for the closure.
     let icon = tray::build_icon()?;
-    let initial_menu = tray::build_menu(&[], /* receiving = */ false)?;
+    let initial_menu = tray::build_menu(&[], /* receiving = */ false, &app.config.alias)?;
     // Tooltip: "{alias} · lsend" — the alias is the LocalSend device name
     // peers will see and the user can recognise across multiple instances.
     let tooltip = tray_tooltip_text(&app.config.alias);
@@ -118,11 +112,11 @@ fn main() -> Result<()> {
         .with_icon(icon)
         .build()?;
     let tray = Arc::new(Mutex::new(tray));
-
     // Reusable pieces for the closure.
     let devices_ref = app.devices.clone();
     let config_ref = app.config.clone();
     let identity_ref = app.identity.clone();
+    let alias_ref = app.config.alias.clone();
     let tray_ref = tray.clone();
 
     // Track whether the tray currently reflects "Receiving". Drives menu
@@ -157,7 +151,7 @@ fn main() -> Result<()> {
                             h.stop().await;
                         });
                         tray_receiving = false;
-                        rebuild_menu(&tray_ref, &devices_ref, tray_receiving);
+                        rebuild_menu(&tray_ref, &devices_ref, tray_receiving, &alias_ref);
                         notify_status("Receiver paused");
                     }
                 }
@@ -170,7 +164,7 @@ fn main() -> Result<()> {
                             proxy.clone(),
                         ));
                         tray_receiving = true;
-                        rebuild_menu(&tray_ref, &devices_ref, tray_receiving);
+                        rebuild_menu(&tray_ref, &devices_ref, tray_receiving, &alias_ref);
                     }
                 }
                 TrayAction::Quit => {
@@ -191,11 +185,11 @@ fn main() -> Result<()> {
             match ui {
                 UiEvent::Receive(ev) => handle_receive_event(ev, tray_receiving),
                 UiEvent::DevicesRefreshed { .. } => {
-                    rebuild_menu(&tray_ref, &devices_ref, tray_receiving);
+                    rebuild_menu(&tray_ref, &devices_ref, tray_receiving, &alias_ref);
                 }
                 UiEvent::ReceiverError(msg) => {
                     tray_receiving = false;
-                    rebuild_menu(&tray_ref, &devices_ref, tray_receiving);
+                    rebuild_menu(&tray_ref, &devices_ref, tray_receiving, &alias_ref);
                     notify_error(&msg);
                 }
                 UiEvent::SendResult(res) => match res {
@@ -221,9 +215,10 @@ fn rebuild_menu(
     tray: &Arc<Mutex<tray_icon::TrayIcon>>,
     devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
     receiving: bool,
+    alias: &str,
 ) {
     let devices_guard = devices.lock();
-    let menu = match tray::build_menu(&devices_guard, receiving) {
+    let menu = match tray::build_menu(&devices_guard, receiving, alias) {
         Ok(m) => m,
         Err(e) => {
             tracing::error!("tray menu build failed: {e}");

@@ -56,17 +56,24 @@ pub fn build_icon() -> Result<Icon> {
 /// Returns `tray_icon::menu::Result` so the inner `?` operators bind to muda's
 /// own error type directly; anyhoo's `?` at the main-loop call site converts
 /// smoothly because `tray_icon::menu::Error` implements `std::error::Error`.
+///
+/// `alias` is the LocalSend device display name (peer-visible). It appears
+/// in the top status line so the menu itself tells the user *whose* tray
+/// this is — keeping it in sync with the tooltip set in `main.rs`.
 pub fn build_menu(
     devices: &[DiscoveredDevice],
     receiving: bool,
+    alias: &str,
 ) -> tray_icon::menu::Result<Menu> {
     let menu = Menu::new();
 
-    // Status line: disabled item reflecting current state.
+    // Status line: disabled item reflecting current state. The first line
+    // identifies the device (the LocalSend alias peers see); the second
+    // is the receiver port / paused indicator.
     let status_text = if receiving {
-        "Receiving — port 53317".to_string()
+        format!("Receiving — {alias} · port 53317")
     } else {
-        "Paused — not receiving".to_string()
+        format!("Paused — {alias} (not receiving)")
     };
     let status = MenuItem::new(status_text, false, None);
     menu.append(&status)?;
