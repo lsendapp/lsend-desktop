@@ -61,4 +61,8 @@ pub enum UiEvent {
     /// available for a subsequent resume.
     ReceiverStopped,
     SendResult(std::result::Result<String, String>),
+    /// Outbound transfer began (file picker finished / send task spawned).
+    TransferStarted,
+    /// Outbound transfer finished (success or failure).
+    TransferEnded,
 }

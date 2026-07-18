@@ -36,7 +36,7 @@ use lsend_core::events::ReceiveEvent;
 
 use crate::receiver::ReceiverHandle;
 use crate::state::{AppState, UiEvent};
-use crate::tray::{ReceiverStatus, TrayAction};
+use crate::tray::{ReceiverStatus, TrayAction, TrayAnimator};
 
 /// User-facing product name in tray UI, notifications, and the macOS bundle.
 pub const APP_DISPLAY_NAME: &str = "LSend";
@@ -97,7 +97,9 @@ fn main() -> Result<()> {
         proxy.clone(),
     );
     // Reusable pieces for the closure.
-    let icon = tray::build_icon()?;
+    let icon_set = tray::load_icon_set()?;
+    let icon = icon_set.idle().clone();
+    let mut tray_anim = TrayAnimator::new(icon_set);
     let initial_menu = tray::build_menu(&[], ReceiverStatus::Starting, &app.config.alias, false)?;
     // Tooltip: "{alias} · LSend" — the alias is the LocalSend device name
     // peers will see and the user can recognise across multiple instances.
@@ -171,6 +173,7 @@ fn main() -> Result<()> {
                             &last_message_ref,
                             receiver_status,
                             &alias_ref,
+                            &tray_anim,
                         );
                     }
                 }
@@ -194,6 +197,7 @@ fn main() -> Result<()> {
                             &last_message_ref,
                             receiver_status,
                             &alias_ref,
+                            &tray_anim,
                         );
                     }
                 }
@@ -215,15 +219,28 @@ fn main() -> Result<()> {
             match ui {
                 UiEvent::Receive(ev) => {
                     let mut rebuild = false;
-                    if matches!(&ev, ReceiveEvent::Ready { .. }) {
-                        receiver_status = ReceiverStatus::Receiving;
-                        rebuild = true;
-                    }
-                    if let ReceiveEvent::MessageReceived { text, .. } = &ev {
-                        let mut guard = last_message_ref.lock();
-                        *guard = Some(text.clone());
-                        drop(guard);
-                        rebuild = true;
+                    match &ev {
+                        ReceiveEvent::Ready { .. } => {
+                            receiver_status = ReceiverStatus::Receiving;
+                            rebuild = true;
+                        }
+                        ReceiveEvent::TransferStarted { .. } => {
+                            tray_anim.begin_receive();
+                            rebuild = true;
+                        }
+                        ReceiveEvent::TransferComplete
+                        | ReceiveEvent::TransferFinishedWithErrors
+                        | ReceiveEvent::TransferCancelled => {
+                            tray_anim.end_receive();
+                            rebuild = true;
+                        }
+                        ReceiveEvent::MessageReceived { text, .. } => {
+                            tray_anim.begin_receive();
+                            let mut guard = last_message_ref.lock();
+                            *guard = Some(text.clone());
+                            rebuild = true;
+                        }
+                        _ => {}
                     }
                     if rebuild {
                         rebuild_menu(
@@ -232,6 +249,7 @@ fn main() -> Result<()> {
                             &last_message_ref,
                             receiver_status,
                             &alias_ref,
+                            &tray_anim,
                         );
                     }
                     handle_receive_event(
@@ -247,30 +265,57 @@ fn main() -> Result<()> {
                         &last_message_ref,
                         receiver_status,
                         &alias_ref,
+                        &tray_anim,
                     );
                 }
                 UiEvent::ReceiverError(msg) => {
                     rx_handle.take();
                     receiver_status = ReceiverStatus::Error;
+                    tray_anim.cancel_receiving();
                     rebuild_menu(
                         &tray_ref,
                         &devices_ref,
                         &last_message_ref,
                         receiver_status,
                         &alias_ref,
+                        &tray_anim,
                     );
                     notify_error(&msg);
                 }
                 UiEvent::ReceiverStopped => {
                     receiver_status = ReceiverStatus::Paused;
+                    tray_anim.cancel_receiving();
                     rebuild_menu(
                         &tray_ref,
                         &devices_ref,
                         &last_message_ref,
                         receiver_status,
                         &alias_ref,
+                        &tray_anim,
                     );
                     notify_status("Receiver paused");
+                }
+                UiEvent::TransferStarted => {
+                    tray_anim.begin_send();
+                    rebuild_menu(
+                        &tray_ref,
+                        &devices_ref,
+                        &last_message_ref,
+                        receiver_status,
+                        &alias_ref,
+                        &tray_anim,
+                    );
+                }
+                UiEvent::TransferEnded => {
+                    tray_anim.end_send();
+                    rebuild_menu(
+                        &tray_ref,
+                        &devices_ref,
+                        &last_message_ref,
+                        receiver_status,
+                        &alias_ref,
+                        &tray_anim,
+                    );
                 }
                 UiEvent::SendResult(res) => match res {
                     Ok(summary) => notify_status(&format!("Sent {summary}")),
@@ -278,6 +323,22 @@ fn main() -> Result<()> {
                 },
             }
         }
+
+        let was_animating = tray_anim.is_animating();
+        let anim_deadline = tray_anim.tick(&tray_ref.borrow());
+        if was_animating && !tray_anim.is_animating() {
+            rebuild_menu(
+                &tray_ref,
+                &devices_ref,
+                &last_message_ref,
+                receiver_status,
+                &alias_ref,
+                &tray_anim,
+            );
+        }
+        *control_flow = anim_deadline
+            .map(ControlFlow::WaitUntil)
+            .unwrap_or(ControlFlow::Wait);
 
         // Suppress unused-warning on `target` while still allowing future
         // EventLoopWindowTarget queries (e.g. hide_application on macOS).
@@ -307,10 +368,12 @@ fn rebuild_menu(
     last_message: &Arc<Mutex<Option<String>>>,
     receiver_status: ReceiverStatus,
     alias: &str,
+    animator: &TrayAnimator,
 ) {
     let has_last_message = last_message.lock().is_some();
+    let menu_status = menu_receiver_status(receiver_status, animator);
     let devices_guard = devices.lock();
-    let menu = match tray::build_menu(&devices_guard, receiver_status, alias, has_last_message) {
+    let menu = match tray::build_menu(&devices_guard, menu_status, alias, has_last_message) {
         Ok(m) => m,
         Err(e) => {
             tracing::error!("tray menu build failed: {e}");
@@ -320,6 +383,20 @@ fn rebuild_menu(
     drop(devices_guard);
     let t = tray.borrow();
     tray::set_tray_menu(&t, menu);
+}
+
+fn menu_receiver_status(
+    receiver_status: ReceiverStatus,
+    animator: &TrayAnimator,
+) -> ReceiverStatus {
+    if animator.is_animating() {
+        match receiver_status {
+            ReceiverStatus::Receiving | ReceiverStatus::Paused => ReceiverStatus::Transferring,
+            other => other,
+        }
+    } else {
+        receiver_status
+    }
 }
 
 #[derive(Default)]
@@ -470,6 +547,8 @@ fn handle_send_file(
         return;
     }
 
+    let _ = proxy.send_event(UiEvent::TransferStarted);
+
     let config2 = config;
     let identity2 = identity;
     let device_label = device.alias.clone();
@@ -496,6 +575,7 @@ fn handle_send_file(
             Ok(_) => Ok(format!("{} file(s) to {}", count, device_label)),
             Err(e) => Err(format!("{e:#}")),
         };
+        let _ = proxy.send_event(UiEvent::TransferEnded);
         let _ = proxy.send_event(UiEvent::SendResult(payload));
     });
 }
@@ -527,6 +607,8 @@ fn handle_send_text(
         return;
     }
 
+    let _ = proxy.send_event(UiEvent::TransferStarted);
+
     rt.spawn(async move {
         let result = lsend_core::send::send_files(
             &config,
@@ -546,6 +628,7 @@ fn handle_send_text(
             Ok(_) => Ok(format!("message to {}", device.alias)),
             Err(e) => Err(format!("{e:#}")),
         };
+        let _ = proxy.send_event(UiEvent::TransferEnded);
         let _ = proxy.send_event(UiEvent::SendResult(payload));
     });
 }

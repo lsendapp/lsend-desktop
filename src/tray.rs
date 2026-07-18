@@ -2,6 +2,8 @@
 //! device list or receiver state changes; each rebuild is a fresh
 //! `tray_icon::menu::Menu` swapped onto the existing tray icon.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use image::GenericImageView;
 use tray_icon::Icon;
@@ -23,15 +25,237 @@ const ID_SEND_FILE_PREFIX: &str = "send-file:";
 const ID_SEND_TEXT_PREFIX: &str = "send-text:";
 
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+const SEND_FRAME_2_PNG: &[u8] = include_bytes!("../assets/send-frame-2.png");
+const SEND_FRAME_3_PNG: &[u8] = include_bytes!("../assets/send-frame-3.png");
+const RECEIVE_FRAME_2_PNG: &[u8] = include_bytes!("../assets/receive-frame-2.png");
+const RECEIVE_FRAME_3_PNG: &[u8] = include_bytes!("../assets/receive-frame-3.png");
+const FRAME_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Send cycle: send-frame-2 → send-frame-3 → idle.
+const SEND_FRAME_PNGS: &[&[u8]] = &[SEND_FRAME_2_PNG, SEND_FRAME_3_PNG, TRAY_ICON_PNG];
+
+/// Receive cycle: receive-frame-2 → receive-frame-3 → idle.
+const RECEIVE_FRAME_PNGS: &[&[u8]] = &[RECEIVE_FRAME_2_PNG, RECEIVE_FRAME_3_PNG, TRAY_ICON_PNG];
+
+/// Which transfer animation to show in the menu bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    Send,
+    Receive,
+}
+
+/// Idle icon plus send/receive animation frame sequences.
+pub struct TrayIconSet {
+    idle: Icon,
+    sending: Vec<Icon>,
+    receiving: Vec<Icon>,
+}
+
+impl TrayIconSet {
+    pub fn idle(&self) -> &Icon {
+        &self.idle
+    }
+}
+
+/// Drives the menu-bar animation while sends or receives are in flight.
+pub struct TrayAnimator {
+    icons: TrayIconSet,
+    active_sends: u32,
+    active_receives: u32,
+    /// Full frame cycles still to play after the last transfer ends.
+    cycles_remaining: u32,
+    display_direction: TransferDirection,
+    frame_index: usize,
+    next_frame_at: Option<Instant>,
+    using_transfer_icon: bool,
+}
+
+impl TrayAnimator {
+    pub fn new(icons: TrayIconSet) -> Self {
+        Self {
+            icons,
+            active_sends: 0,
+            active_receives: 0,
+            cycles_remaining: 0,
+            display_direction: TransferDirection::Receive,
+            frame_index: 0,
+            next_frame_at: None,
+            using_transfer_icon: false,
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.active_sends > 0 || self.active_receives > 0 || self.cycles_remaining > 0
+    }
+
+    pub fn begin_send(&mut self) {
+        self.active_sends += 1;
+        self.begin_activity(TransferDirection::Send);
+    }
+
+    pub fn begin_receive(&mut self) {
+        self.active_receives += 1;
+        self.begin_activity(TransferDirection::Receive);
+    }
+
+    pub fn end_send(&mut self) {
+        self.active_sends = self.active_sends.saturating_sub(1);
+        self.sync_direction_after_activity_change();
+    }
+
+    pub fn end_receive(&mut self) {
+        self.active_receives = self.active_receives.saturating_sub(1);
+        self.sync_direction_after_activity_change();
+    }
+
+    pub fn cancel_receiving(&mut self) {
+        self.active_receives = 0;
+        self.sync_direction_after_activity_change();
+    }
+
+    fn begin_activity(&mut self, direction: TransferDirection) {
+        self.cycles_remaining = self.cycles_remaining.max(1);
+        let first_activity = self.active_sends + self.active_receives == 1;
+        if first_activity && !self.using_transfer_icon {
+            self.display_direction = direction;
+            self.frame_index = 0;
+            self.next_frame_at = None;
+        }
+    }
+
+    fn preferred_direction(&self) -> TransferDirection {
+        if self.active_receives > 0 {
+            TransferDirection::Receive
+        } else if self.active_sends > 0 {
+            TransferDirection::Send
+        } else {
+            self.display_direction
+        }
+    }
+
+    fn sync_direction_after_activity_change(&mut self) {
+        let preferred = self.preferred_direction();
+        if preferred != self.display_direction && self.is_animating() {
+            self.display_direction = preferred;
+            self.frame_index = 0;
+            self.next_frame_at = None;
+        }
+    }
+
+    /// Advance the tray icon when due. Returns the next wake time while animating.
+    pub fn tick(&mut self, tray: &TrayIcon) -> Option<Instant> {
+        if !self.is_animating() {
+            if self.using_transfer_icon {
+                if let Err(e) = set_tray_icon(tray, self.icons.idle()) {
+                    tracing::warn!("tray icon restore failed: {e}");
+                }
+                self.using_transfer_icon = false;
+            }
+            self.frame_index = 0;
+            self.next_frame_at = None;
+            return None;
+        }
+
+        let preferred = self.preferred_direction();
+        if preferred != self.display_direction {
+            self.display_direction = preferred;
+            self.frame_index = 0;
+            self.next_frame_at = None;
+        }
+
+        let now = Instant::now();
+        if let Some(deadline) = self.next_frame_at {
+            if now < deadline {
+                return Some(deadline);
+            }
+        }
+
+        let (frame_count, icon) = match self.display_direction {
+            TransferDirection::Send => {
+                let count = self.icons.sending.len().max(1);
+                let icon = self
+                    .icons
+                    .sending
+                    .get(self.frame_index)
+                    .cloned()
+                    .unwrap_or_else(|| self.icons.idle().clone());
+                (count, icon)
+            }
+            TransferDirection::Receive => {
+                let count = self.icons.receiving.len().max(1);
+                let icon = self
+                    .icons
+                    .receiving
+                    .get(self.frame_index)
+                    .cloned()
+                    .unwrap_or_else(|| self.icons.idle().clone());
+                (count, icon)
+            }
+        };
+        if let Err(e) = set_tray_icon(tray, &icon) {
+            tracing::warn!("tray icon update failed: {e}");
+        }
+        self.using_transfer_icon = true;
+        self.frame_index = (self.frame_index + 1) % frame_count;
+        if self.frame_index == 0 {
+            self.cycles_remaining = self.cycles_remaining.saturating_sub(1);
+        }
+        let deadline = now + FRAME_INTERVAL;
+        self.next_frame_at = Some(deadline);
+        Some(deadline)
+    }
+}
+
+/// Load the idle PNG and embedded send/receive animation frames.
+pub fn load_icon_set() -> Result<TrayIconSet> {
+    let idle = decode_png_to_icon(TRAY_ICON_PNG, "tray icon")?;
+    let expected_size = png_dimensions(TRAY_ICON_PNG)?;
+    let sending = load_frame_sequence(SEND_FRAME_PNGS, "send", expected_size)?;
+    let receiving = load_frame_sequence(RECEIVE_FRAME_PNGS, "receive", expected_size)?;
+    Ok(TrayIconSet {
+        idle,
+        sending,
+        receiving,
+    })
+}
+
+fn load_frame_sequence(
+    pngs: &[&[u8]],
+    label: &str,
+    expected_size: (u32, u32),
+) -> Result<Vec<Icon>> {
+    let mut frames = Vec::with_capacity(pngs.len());
+    for (index, png) in pngs.iter().enumerate() {
+        let size = png_dimensions(png)?;
+        anyhow::ensure!(
+            size == expected_size,
+            "{label} frame {} is {}x{}, expected {}x{}",
+            index + 1,
+            size.0,
+            size.1,
+            expected_size.0,
+            expected_size.1
+        );
+        frames.push(decode_png_to_icon(
+            png,
+            &format!("{label} frame {}", index + 1),
+        )?);
+    }
+    Ok(frames)
+}
 
 /// Build a tray icon from the embedded PNG asset.
 pub fn build_icon() -> Result<Icon> {
-    build_icon_template()
+    decode_png_to_icon(TRAY_ICON_PNG, "tray icon")
 }
 
-/// macOS menu bar icons must be monochrome template images (alpha mask only).
-fn build_icon_template() -> Result<Icon> {
-    let (width, height, rgba) = decode_tray_icon_png(TRAY_ICON_PNG)?;
+fn png_dimensions(png: &[u8]) -> Result<(u32, u32)> {
+    let image = image::load_from_memory(png).context("read png dimensions")?;
+    Ok(image.dimensions())
+}
+
+fn decode_png_to_icon(png: &[u8], label: &str) -> Result<Icon> {
+    let (width, height, rgba) = decode_tray_icon_png(png).with_context(|| format!("decode {label}"))?;
     Ok(Icon::from_rgba(rgba, width, height)?)
 }
 
@@ -52,11 +276,20 @@ fn decode_tray_icon_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     Ok((width, height, rgba))
 }
 
+fn set_tray_icon(tray: &TrayIcon, icon: &Icon) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    tray.set_icon_with_as_template(Some(icon.clone()), true)?;
+    #[cfg(not(target_os = "macos"))]
+    tray.set_icon(Some(icon.clone()))?;
+    Ok(())
+}
+
 /// Current receiver lifecycle state as presented by the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverStatus {
     Starting,
     Receiving,
+    Transferring,
     Stopping,
     Paused,
     Error,
@@ -85,6 +318,7 @@ pub fn build_menu(
     let status_text = match receiver_status {
         ReceiverStatus::Starting => format!("Starting — {alias}"),
         ReceiverStatus::Receiving => format!("Receiving — {alias} · port 53317"),
+        ReceiverStatus::Transferring => format!("Transferring — {alias}"),
         ReceiverStatus::Stopping => format!("Pausing — {alias}"),
         ReceiverStatus::Paused => format!("Paused — {alias} (not receiving)"),
         ReceiverStatus::Error => format!("Receiver error — {alias}"),
@@ -136,12 +370,14 @@ pub fn build_menu(
     ))?;
 
     match receiver_status {
-        ReceiverStatus::Receiving => menu.append(&MenuItem::with_id(
-            MenuId::new(ID_PAUSE),
-            "Pause receiving",
-            true,
-            None,
-        ))?,
+        ReceiverStatus::Receiving | ReceiverStatus::Transferring => {
+            menu.append(&MenuItem::with_id(
+                MenuId::new(ID_PAUSE),
+                "Pause receiving",
+                receiver_status == ReceiverStatus::Receiving,
+                None,
+            ))?
+        }
         ReceiverStatus::Paused | ReceiverStatus::Error => menu.append(&MenuItem::with_id(
             MenuId::new(ID_RESUME),
             "Resume receiving",
@@ -284,6 +520,29 @@ mod tests {
         assert!(
             rgba.chunks_exact(4).any(|pixel| pixel[3] == 0),
             "expected transparent pixels in tray icon"
+        );
+    }
+
+    #[test]
+    fn transfer_animation_loads_send_and_receive_png_frames() {
+        let icons = load_icon_set().expect("load icon set");
+        assert_eq!(icons.sending.len(), SEND_FRAME_PNGS.len());
+        assert_eq!(icons.receiving.len(), RECEIVE_FRAME_PNGS.len());
+        let expected = png_dimensions(TRAY_ICON_PNG).expect("tray icon dimensions");
+        assert_eq!(png_dimensions(SEND_FRAME_2_PNG).expect("send frame 2"), expected);
+        assert_eq!(png_dimensions(RECEIVE_FRAME_2_PNG).expect("receive frame 2"), expected);
+    }
+
+    #[test]
+    fn tray_animator_plays_at_least_one_cycle_after_receive_ends() {
+        let icons = load_icon_set().expect("load icon set");
+        let mut animator = TrayAnimator::new(icons);
+        animator.begin_receive();
+        assert!(animator.is_animating());
+        animator.end_receive();
+        assert!(
+            animator.is_animating(),
+            "animation should continue until one full cycle finishes"
         );
     }
 }
