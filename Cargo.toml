@@ -1,0 +1,46 @@
+[package]
+name = "lsend-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lightweight LocalSend desktop client with system-tray send and always-on receive"
+
+[[bin]]
+name = "lsend-desktop"
+path = "src/main.rs"
+
+[dependencies]
+lsend-cli = { path = "../cli" }
+
+# Background async runtime for the resident receiver, scanner, and sends.
+tokio = { version = "1.49", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Brief, unwrapped lock holds (device cache + tray icon). Use parking_lot per
+# project rule: `lock()` returns a guard directly, no poisoning unwrap.
+parking_lot = "0.12"
+
+# Event loop + tray + menus. tray-icon re-exports `menu::*` (muda) at the
+# *compatible* version, so we depend only on tray-icon (not muda directly)
+# to avoid two `muda` versions in the graph.
+tao = "0.32"
+tray-icon = "0.20"
+
+# Native system notifications (macOS Notification Center / Windows toast).
+notify-rust = "4.11"
+
+# Native file picker, invoked from tray "Send file to…".
+rfd = "0.15"
+
+# Embedded tray icon (build-time PNG bytes → RGBA).
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Misc
+dirs = "6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
