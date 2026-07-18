@@ -98,7 +98,7 @@ pub fn build_menu(
     let send_file_submenu = Submenu::new("Send file to…", true);
     let send_text_submenu = Submenu::new("Send text to…", true);
     if devices.is_empty() {
-        let empty_label = "(no devices nearby — refresh)";
+        let empty_label = "(no devices nearby)";
         send_file_submenu.append(&MenuItem::new(empty_label, false, None))?;
         send_text_submenu.append(&MenuItem::new(empty_label, false, None))?;
     } else {
@@ -119,15 +119,14 @@ pub fn build_menu(
             ))?;
         }
     }
-    send_file_submenu.append(&PredefinedMenuItem::separator())?;
-    send_file_submenu.append(&MenuItem::with_id(
+    menu.append(&send_file_submenu)?;
+    menu.append(&send_text_submenu)?;
+    menu.append(&MenuItem::with_id(
         MenuId::new(ID_REFRESH),
         "Refresh devices",
         true,
         None,
     ))?;
-    menu.append(&send_file_submenu)?;
-    menu.append(&send_text_submenu)?;
 
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&MenuItem::with_id(
@@ -157,12 +156,6 @@ pub fn build_menu(
             menu.append(&MenuItem::new("Pausing receiver…", false, None))?
         }
     }
-    menu.append(&MenuItem::with_id(
-        MenuId::new(ID_REFRESH),
-        "Refresh devices",
-        true,
-        None,
-    ))?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&MenuItem::with_id(
         MenuId::new(ID_QUIT),
