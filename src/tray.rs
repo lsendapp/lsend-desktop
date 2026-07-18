@@ -2,7 +2,8 @@
 //! device list or receiver state changes; each rebuild is a fresh
 //! `tray_icon::menu::Menu` swapped onto the existing tray icon.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use image::GenericImageView;
 use tray_icon::Icon;
 use tray_icon::TrayIcon;
 use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
@@ -20,69 +21,34 @@ const ID_COPY_LAST_MESSAGE: &str = "copy-last-message";
 const ID_SEND_FILE_PREFIX: &str = "send-file:";
 const ID_SEND_TEXT_PREFIX: &str = "send-text:";
 
-/// Build a 32×32 RGBA tray icon without an on-disk asset.
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+
+/// Build a tray icon from the embedded PNG asset.
 pub fn build_icon() -> Result<Icon> {
-    #[cfg(target_os = "macos")]
-    {
-        build_icon_template()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        build_icon_colored()
-    }
+    build_icon_template()
 }
 
 /// macOS menu bar icons must be monochrome template images (alpha mask only).
 fn build_icon_template() -> Result<Icon> {
-    const S: u32 = 32;
-    let mut rgba = Vec::with_capacity((S as usize) * (S as usize) * 4);
-
-    let opaque = [0u8, 0, 0, 0xFF];
-    let transparent = [0u8, 0, 0, 0];
-
-    for y in 0..S {
-        for x in 0..S {
-            let in_corner = !(2..S - 2).contains(&x) && !(2..S - 2).contains(&y);
-            let corner_diag = (x.min(S - 1 - x) as i32 + y.min(S - 1 - y) as i32) < 2;
-            let color = if in_corner && corner_diag {
-                transparent
-            } else if (4..S - 4).contains(&x) && (4..S - 4).contains(&y) {
-                transparent
-            } else {
-                opaque
-            };
-            rgba.extend_from_slice(&color);
-        }
-    }
-
-    Ok(Icon::from_rgba(rgba, S, S)?)
+    let (width, height, rgba) = decode_tray_icon_png(TRAY_ICON_PNG)?;
+    Ok(Icon::from_rgba(rgba, width, height)?)
 }
 
-/// Colored placeholder for platforms that allow full-color tray icons.
-fn build_icon_colored() -> Result<Icon> {
-    const S: u32 = 32;
-    let mut rgba = Vec::with_capacity((S as usize) * (S as usize) * 4);
+fn decode_tray_icon_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    let image = image::load_from_memory(png).context("decode tray icon PNG")?;
+    let (width, height) = image.dimensions();
+    let mut rgba = image.to_rgba8().into_raw();
 
-    let outer = [0x16u8, 0xA3, 0x4A, 0xFF];
-    let inner = [0x4Au8, 0xD0, 0x78, 0xFF];
-    let transparent = [0u8, 0, 0, 0];
-
-    for y in 0..S {
-        for x in 0..S {
-            let in_corner = !(2..S - 2).contains(&x) && !(2..S - 2).contains(&y);
-            let corner_diag = (x.min(S - 1 - x) as i32 + y.min(S - 1 - y) as i32) < 2;
-            let color = if in_corner && corner_diag {
-                transparent
-            } else if (4..S - 4).contains(&x) && (4..S - 4).contains(&y) {
-                inner
-            } else {
-                outer
-            };
-            rgba.extend_from_slice(&color);
+    for chunk in rgba.chunks_exact_mut(4) {
+        if chunk[3] > 0 {
+            chunk[0] = 0;
+            chunk[1] = 0;
+            chunk[2] = 0;
+            chunk[3] = 0xFF;
         }
     }
 
-    Ok(Icon::from_rgba(rgba, S, S)?)
+    Ok((width, height, rgba))
 }
 
 /// Current receiver lifecycle state as presented by the tray.
@@ -302,5 +268,20 @@ mod tests {
             parse_action(ID_COPY_LAST_MESSAGE),
             TrayAction::CopyLastMessage
         ));
+    }
+
+    #[test]
+    fn tray_icon_loads_embedded_png() {
+        let (width, height, rgba) =
+            decode_tray_icon_png(TRAY_ICON_PNG).expect("decode embedded tray icon PNG");
+        assert_eq!((width, height), (128, 128));
+        assert!(
+            rgba.chunks_exact(4).any(|pixel| pixel[3] == 0xFF),
+            "expected opaque pixels in tray icon"
+        );
+        assert!(
+            rgba.chunks_exact(4).any(|pixel| pixel[3] == 0),
+            "expected transparent pixels in tray icon"
+        );
     }
 }

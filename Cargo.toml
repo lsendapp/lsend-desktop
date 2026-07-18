@@ -35,7 +35,7 @@ notify-rust = "4.11"
 rfd = "0.15"
 tinyfiledialogs = "3.9.1"
 
-# Embedded tray icon (build-time PNG bytes → RGBA).
+# Embedded tray icon (PNG bytes → RGBA at startup).
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Misc
