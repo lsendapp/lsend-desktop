@@ -40,6 +40,34 @@ use crate::tray::TrayAction;
 
 const APP_NAME: &str = "lsend";
 
+/// Resolve the current macOS/Linux user. We prefer `id -un` (POSIX) over
+/// `whoami` because `whoami` on macOS reads from `/etc/utmp` and can return a
+/// stale name if the process is launched via `open` from a different session.
+/// Falls back to the env vars `USER` / `USERNAME`, finally to `"unknown"`.
+fn current_user() -> String {
+    use std::process::Command;
+
+    if let Ok(out) = Command::new("id").arg("-un").output() {
+        if out.status.success() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                let name = s.trim();
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    for var in ["USER", "USERNAME"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
 fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -91,8 +119,6 @@ fn main() -> Result<()> {
         app.devices.clone(),
         proxy.clone(),
     );
-
-
     // Reusable pieces for the closure.
     let devices_ref = app.devices.clone();
     let config_ref = app.config.clone();
