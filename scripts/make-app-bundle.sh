@@ -23,6 +23,19 @@ cd "$(dirname "$0")/.."
 
 PROFILE="${1:-release}"
 
+# Validate profile before doing any work.
+case "$PROFILE" in
+  release|debug|run) ;;
+  *) echo "usage: $0 [release|debug|run]"; exit 64 ;;
+esac
+
+# `cargo build` only knows about release/debug; `run` means "build the bundle
+# and launch via `open`", so normalise to a real profile before computing
+# BIN_PATH.
+if [ "$PROFILE" = "run" ]; then
+  PROFILE="release"
+fi
+
 # Locate the binary. We honour CARGO_TARGET_DIR (lets CI funnel artifacts
 # elsewhere) and fall back to the workspace target dir at the repo root,
 # which is where `cargo build --release -p lsend-desktop` puts it under a
@@ -91,6 +104,9 @@ fi
 
 echo "Built: $BUNDLE_DIR"
 
-if [ "$PROFILE" = "run" ]; then
+# `run` was normalised to `release` above; remember whether the caller asked
+# for run so we know to launch at the end.
+WANT_RUN="${1:-}"
+if [ "$WANT_RUN" = "run" ]; then
   exec open "$BUNDLE_DIR"
 fi
