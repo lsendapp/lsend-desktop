@@ -101,11 +101,15 @@ fn main() -> Result<()> {
     // Tooltip: "{alias} · lsend" — the alias is the LocalSend device name
     // peers will see and the user can recognise across multiple instances.
     let tooltip = tray_tooltip_text(&app.config.alias);
-    let tray = TrayIconBuilder::new()
+    let mut tray_builder = TrayIconBuilder::new()
         .with_menu(Box::new(initial_menu))
         .with_tooltip(tooltip)
-        .with_icon(icon)
-        .build()?;
+        .with_icon(icon);
+    #[cfg(target_os = "macos")]
+    {
+        tray_builder = tray_builder.with_icon_as_template(true);
+    }
+    let tray = tray_builder.build()?;
     let tray = Rc::new(RefCell::new(tray));
     // Reusable pieces for the closure.
     let devices_ref = app.devices.clone();

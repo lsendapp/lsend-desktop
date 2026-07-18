@@ -20,23 +20,55 @@ const ID_COPY_LAST_MESSAGE: &str = "copy-last-message";
 const ID_SEND_FILE_PREFIX: &str = "send-file:";
 const ID_SEND_TEXT_PREFIX: &str = "send-text:";
 
-/// Build a 32×32 RGBA tray icon without an on-disk asset. The shape is a
-/// filled rounded square in lsend's brand green so the icon is recognizable
-/// even before we ship packaged `.icns`/`.ico` files.
+/// Build a 32×32 RGBA tray icon without an on-disk asset.
 pub fn build_icon() -> Result<Icon> {
+    #[cfg(target_os = "macos")]
+    {
+        build_icon_template()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        build_icon_colored()
+    }
+}
+
+/// macOS menu bar icons must be monochrome template images (alpha mask only).
+fn build_icon_template() -> Result<Icon> {
     const S: u32 = 32;
     let mut rgba = Vec::with_capacity((S as usize) * (S as usize) * 4);
 
-    // Brand green (#16A34A) outer, lighter inner ring for contrast against both
-    // light and dark menu bars.
+    let opaque = [0u8, 0, 0, 0xFF];
+    let transparent = [0u8, 0, 0, 0];
+
+    for y in 0..S {
+        for x in 0..S {
+            let in_corner = !(2..S - 2).contains(&x) && !(2..S - 2).contains(&y);
+            let corner_diag = (x.min(S - 1 - x) as i32 + y.min(S - 1 - y) as i32) < 2;
+            let color = if in_corner && corner_diag {
+                transparent
+            } else if (4..S - 4).contains(&x) && (4..S - 4).contains(&y) {
+                transparent
+            } else {
+                opaque
+            };
+            rgba.extend_from_slice(&color);
+        }
+    }
+
+    Ok(Icon::from_rgba(rgba, S, S)?)
+}
+
+/// Colored placeholder for platforms that allow full-color tray icons.
+fn build_icon_colored() -> Result<Icon> {
+    const S: u32 = 32;
+    let mut rgba = Vec::with_capacity((S as usize) * (S as usize) * 4);
+
     let outer = [0x16u8, 0xA3, 0x4A, 0xFF];
     let inner = [0x4Au8, 0xD0, 0x78, 0xFF];
     let transparent = [0u8, 0, 0, 0];
 
     for y in 0..S {
         for x in 0..S {
-            // Rounded corner mask: drop corner pixels where the nearest edge
-            // sum is < 2 from both axes.
             let in_corner = !(2..S - 2).contains(&x) && !(2..S - 2).contains(&y);
             let corner_diag = (x.min(S - 1 - x) as i32 + y.min(S - 1 - y) as i32) < 2;
             let color = if in_corner && corner_diag {
