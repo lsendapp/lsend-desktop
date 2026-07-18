@@ -4,9 +4,7 @@
 //!
 //! The interval is intentionally coarse (5 s) — device presence is a CLI
 //! convenience for the tray submenu, not a real-time requirement. The scan is
-//! also short-circuited: if the resident receiver has 53317 bound, the scan's
-//! own discovery server cannot bind the same port and we fall back to UDP
-//! multicast only (already non-fatal inside `discovery::scan`).
+//! uses passive discovery because the resident receiver owns port 53317.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,9 +55,9 @@ pub fn spawn(
         let _output = OutputOptions::new(false, true);
 
         loop {
-            // Re-clone AppConfig/Identity per scan: scan mutates (binding ports)
-            // and we don't want lifetime fights with the Arc's contents.
-            let result = discovery::scan(&config, &identity, SCAN_TIMEOUT_MS).await;
+            // Passive scanning shares immutable config and identity references;
+            // it never competes with the resident receiver for the TCP port.
+            let result = discovery::scan_passive(&config, &identity, SCAN_TIMEOUT_MS).await;
 
             match result {
                 Ok(mut devices_list) => {

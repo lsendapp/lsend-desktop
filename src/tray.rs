@@ -16,7 +16,9 @@ const ID_RESUME: &str = "resume";
 const ID_PAUSE: &str = "pause";
 const ID_REFRESH: &str = "refresh";
 const ID_QUIT: &str = "quit";
-const ID_SEND_PREFIX: &str = "send:";
+const ID_COPY_LAST_MESSAGE: &str = "copy-last-message";
+const ID_SEND_FILE_PREFIX: &str = "send-file:";
+const ID_SEND_TEXT_PREFIX: &str = "send-text:";
 
 /// Build a 32×32 RGBA tray icon without an on-disk asset. The shape is a
 /// filled rounded square in lsend's brand green so the icon is recognizable
@@ -74,6 +76,7 @@ pub fn build_menu(
     devices: &[DiscoveredDevice],
     receiver_status: ReceiverStatus,
     alias: &str,
+    has_last_message: bool,
 ) -> tray_icon::menu::Result<Menu> {
     let menu = Menu::new();
 
@@ -91,31 +94,48 @@ pub fn build_menu(
     menu.append(&status)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // "Send file to…" submenu: one entry per discovered device.
-    let send_submenu = Submenu::new("Send file to…", true);
+    // Send submenus: one entry per discovered device.
+    let send_file_submenu = Submenu::new("Send file to…", true);
+    let send_text_submenu = Submenu::new("Send text to…", true);
     if devices.is_empty() {
-        send_submenu.append(&MenuItem::new("(no devices nearby — refresh)", false, None))?;
+        let empty_label = "(no devices nearby — refresh)";
+        send_file_submenu.append(&MenuItem::new(empty_label, false, None))?;
+        send_text_submenu.append(&MenuItem::new(empty_label, false, None))?;
     } else {
         for d in devices {
             let label = format!("{}  ({}{})", d.alias, d.ip, port_suffix(d));
-            send_submenu.append(&MenuItem::with_id(
-                MenuId::new(format!("{ID_SEND_PREFIX}{}", device_key(d))),
+            let key = device_key(d);
+            send_file_submenu.append(&MenuItem::with_id(
+                MenuId::new(format!("{ID_SEND_FILE_PREFIX}{key}")),
+                label.clone(),
+                true,
+                None,
+            ))?;
+            send_text_submenu.append(&MenuItem::with_id(
+                MenuId::new(format!("{ID_SEND_TEXT_PREFIX}{key}")),
                 label,
                 true,
                 None,
             ))?;
         }
     }
-    send_submenu.append(&PredefinedMenuItem::separator())?;
-    send_submenu.append(&MenuItem::with_id(
+    send_file_submenu.append(&PredefinedMenuItem::separator())?;
+    send_file_submenu.append(&MenuItem::with_id(
         MenuId::new(ID_REFRESH),
         "Refresh devices",
         true,
         None,
     ))?;
-    menu.append(&send_submenu)?;
+    menu.append(&send_file_submenu)?;
+    menu.append(&send_text_submenu)?;
 
     menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&MenuItem::with_id(
+        MenuId::new(ID_COPY_LAST_MESSAGE),
+        "Copy last received message",
+        has_last_message,
+        None,
+    ))?;
 
     match receiver_status {
         ReceiverStatus::Receiving => menu.append(&MenuItem::with_id(
@@ -173,7 +193,9 @@ pub fn device_key(d: &DiscoveredDevice) -> String {
 #[derive(Debug, Clone)]
 pub enum TrayAction {
     /// Stable identity of the selected peer.
-    Send(String),
+    SendFile(String),
+    SendText(String),
+    CopyLastMessage,
     Refresh,
     Pause,
     Resume,
@@ -189,8 +211,12 @@ pub fn parse_action(id: &str) -> TrayAction {
         ID_RESUME => TrayAction::Resume,
         ID_REFRESH => TrayAction::Refresh,
         ID_QUIT => TrayAction::Quit,
-        other if other.starts_with(ID_SEND_PREFIX) => {
-            TrayAction::Send(other[ID_SEND_PREFIX.len()..].to_owned())
+        ID_COPY_LAST_MESSAGE => TrayAction::CopyLastMessage,
+        other if other.starts_with(ID_SEND_FILE_PREFIX) => {
+            TrayAction::SendFile(other[ID_SEND_FILE_PREFIX.len()..].to_owned())
+        }
+        other if other.starts_with(ID_SEND_TEXT_PREFIX) => {
+            TrayAction::SendText(other[ID_SEND_TEXT_PREFIX.len()..].to_owned())
         }
         _ => TrayAction::Ignored,
     }
@@ -224,8 +250,13 @@ mod tests {
         let peer = device("192.168.1.20", 53317, "abc123");
         let key = device_key(&peer);
 
-        match parse_action(&format!("{ID_SEND_PREFIX}{key}")) {
-            TrayAction::Send(parsed_key) => assert_eq!(parsed_key, key),
+        match parse_action(&format!("{ID_SEND_FILE_PREFIX}{key}")) {
+            TrayAction::SendFile(parsed_key) => assert_eq!(parsed_key, key),
+            action => panic!("unexpected action: {action:?}"),
+        }
+
+        match parse_action(&format!("{ID_SEND_TEXT_PREFIX}{key}")) {
+            TrayAction::SendText(parsed_key) => assert_eq!(parsed_key, key),
             action => panic!("unexpected action: {action:?}"),
         }
     }
@@ -238,5 +269,13 @@ mod tests {
 
         assert_ne!(device_key(&first), device_key(&different_port));
         assert_ne!(device_key(&first), device_key(&different_identity));
+    }
+
+    #[test]
+    fn copy_last_message_action_is_parsed() {
+        assert!(matches!(
+            parse_action(ID_COPY_LAST_MESSAGE),
+            TrayAction::CopyLastMessage
+        ));
     }
 }

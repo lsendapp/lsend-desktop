@@ -94,7 +94,7 @@ fn main() -> Result<()> {
     );
     // Reusable pieces for the closure.
     let icon = tray::build_icon()?;
-    let initial_menu = tray::build_menu(&[], ReceiverStatus::Starting, &app.config.alias)?;
+    let initial_menu = tray::build_menu(&[], ReceiverStatus::Starting, &app.config.alias, false)?;
     // Tooltip: "{alias} · lsend" — the alias is the LocalSend device name
     // peers will see and the user can recognise across multiple instances.
     let tooltip = tray_tooltip_text(&app.config.alias);
@@ -106,6 +106,7 @@ fn main() -> Result<()> {
     let tray = Rc::new(RefCell::new(tray));
     // Reusable pieces for the closure.
     let devices_ref = app.devices.clone();
+    let last_message_ref = app.last_message.clone();
     let config_ref = app.config.clone();
     let identity_ref = app.identity.clone();
     let alias_ref = app.config.alias.clone();
@@ -120,7 +121,7 @@ fn main() -> Result<()> {
             let id = menu_event.id.0.as_str().to_string();
             let action = tray::parse_action(&id);
             match action {
-                TrayAction::Send(device_key) => {
+                TrayAction::SendFile(device_key) => {
                     handle_send_file(
                         &rt_handle,
                         config_ref.clone(),
@@ -129,6 +130,19 @@ fn main() -> Result<()> {
                         &device_key,
                         proxy.clone(),
                     );
+                }
+                TrayAction::SendText(device_key) => {
+                    handle_send_text(
+                        &rt_handle,
+                        config_ref.clone(),
+                        identity_ref.clone(),
+                        &devices_ref,
+                        &device_key,
+                        proxy.clone(),
+                    );
+                }
+                TrayAction::CopyLastMessage => {
+                    copy_last_message(&last_message_ref);
                 }
                 TrayAction::Refresh => {
                     scanner_handle.refresh();
@@ -142,7 +156,13 @@ fn main() -> Result<()> {
                             let _ = stopped_proxy.send_event(UiEvent::ReceiverStopped);
                         });
                         receiver_status = ReceiverStatus::Stopping;
-                        rebuild_menu(&tray_ref, &devices_ref, receiver_status, &alias_ref);
+                        rebuild_menu(
+                            &tray_ref,
+                            &devices_ref,
+                            &last_message_ref,
+                            receiver_status,
+                            &alias_ref,
+                        );
                     }
                 }
                 TrayAction::Resume => {
@@ -159,7 +179,13 @@ fn main() -> Result<()> {
                             proxy.clone(),
                         ));
                         receiver_status = ReceiverStatus::Starting;
-                        rebuild_menu(&tray_ref, &devices_ref, receiver_status, &alias_ref);
+                        rebuild_menu(
+                            &tray_ref,
+                            &devices_ref,
+                            &last_message_ref,
+                            receiver_status,
+                            &alias_ref,
+                        );
                     }
                 }
                 TrayAction::Quit => {
@@ -179,24 +205,58 @@ fn main() -> Result<()> {
         if let tao::event::Event::UserEvent(ui) = event {
             match ui {
                 UiEvent::Receive(ev) => {
-                    if matches!(ev, ReceiveEvent::Ready { .. }) {
+                    let mut rebuild = false;
+                    if matches!(&ev, ReceiveEvent::Ready { .. }) {
                         receiver_status = ReceiverStatus::Receiving;
-                        rebuild_menu(&tray_ref, &devices_ref, receiver_status, &alias_ref);
+                        rebuild = true;
+                    }
+                    if let ReceiveEvent::MessageReceived { text, .. } = &ev {
+                        let mut guard = last_message_ref.lock();
+                        *guard = Some(text.clone());
+                        drop(guard);
+                        rebuild = true;
+                    }
+                    if rebuild {
+                        rebuild_menu(
+                            &tray_ref,
+                            &devices_ref,
+                            &last_message_ref,
+                            receiver_status,
+                            &alias_ref,
+                        );
                     }
                     handle_receive_event(ev);
                 }
                 UiEvent::DevicesRefreshed { .. } => {
-                    rebuild_menu(&tray_ref, &devices_ref, receiver_status, &alias_ref);
+                    rebuild_menu(
+                        &tray_ref,
+                        &devices_ref,
+                        &last_message_ref,
+                        receiver_status,
+                        &alias_ref,
+                    );
                 }
                 UiEvent::ReceiverError(msg) => {
                     rx_handle.take();
                     receiver_status = ReceiverStatus::Error;
-                    rebuild_menu(&tray_ref, &devices_ref, receiver_status, &alias_ref);
+                    rebuild_menu(
+                        &tray_ref,
+                        &devices_ref,
+                        &last_message_ref,
+                        receiver_status,
+                        &alias_ref,
+                    );
                     notify_error(&msg);
                 }
                 UiEvent::ReceiverStopped => {
                     receiver_status = ReceiverStatus::Paused;
-                    rebuild_menu(&tray_ref, &devices_ref, receiver_status, &alias_ref);
+                    rebuild_menu(
+                        &tray_ref,
+                        &devices_ref,
+                        &last_message_ref,
+                        receiver_status,
+                        &alias_ref,
+                    );
                     notify_status("Receiver paused");
                 }
                 UiEvent::SendResult(res) => match res {
@@ -221,11 +281,13 @@ fn main() -> Result<()> {
 fn rebuild_menu(
     tray: &Rc<RefCell<tray_icon::TrayIcon>>,
     devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
+    last_message: &Arc<Mutex<Option<String>>>,
     receiver_status: ReceiverStatus,
     alias: &str,
 ) {
+    let has_last_message = last_message.lock().is_some();
     let devices_guard = devices.lock();
-    let menu = match tray::build_menu(&devices_guard, receiver_status, alias) {
+    let menu = match tray::build_menu(&devices_guard, receiver_status, alias, has_last_message) {
         Ok(m) => m,
         Err(e) => {
             tracing::error!("tray menu build failed: {e}");
@@ -253,12 +315,15 @@ fn handle_receive_event(ev: ReceiveEvent) {
         ReceiveEvent::MessageReceived {
             sender_alias, text, ..
         } => {
-            let body = if text.chars().count() > 160 {
+            let preview = if text.chars().count() > 160 {
                 format!("{}…", text.chars().take(160).collect::<String>())
             } else {
                 text
             };
-            notify_block(&format!("Message from {sender_alias}"), &body);
+            notify_block(
+                &format!("Message from {sender_alias}"),
+                &format!("{preview}\nUse the tray menu to copy the full message."),
+            );
         }
         ReceiveEvent::FileSaved { file_name, .. } => {
             notify_status(&format!("Saved {file_name}"));
@@ -289,18 +354,10 @@ fn handle_send_file(
     device_key: &str,
     proxy: tao::event_loop::EventLoopProxy<UiEvent>,
 ) {
-    let guard = devices.lock();
-    let Some(device) = guard
-        .iter()
-        .find(|device| tray::device_key(device) == device_key)
-        .cloned()
-    else {
-        let _ = proxy.send_event(UiEvent::SendResult(Err(
-            "Selected device is no longer available.".to_string(),
-        )));
+    let Some(device) = find_device(devices, device_key) else {
+        report_missing_device(&proxy);
         return;
     };
-    drop(guard);
 
     let files = rfd::FileDialog::new()
         .set_title(format!("Send file(s) to {}", device.alias))
@@ -347,6 +404,86 @@ fn handle_send_file(
         };
         let _ = proxy.send_event(UiEvent::SendResult(payload));
     });
+}
+
+fn handle_send_text(
+    rt: &tokio::runtime::Handle,
+    config: Arc<lsend_core::config::AppConfig>,
+    identity: Arc<lsend_core::identity::Identity>,
+    devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
+    device_key: &str,
+    proxy: tao::event_loop::EventLoopProxy<UiEvent>,
+) {
+    let Some(device) = find_device(devices, device_key) else {
+        report_missing_device(&proxy);
+        return;
+    };
+
+    let Some(text) = tinyfiledialogs::input_box(
+        &format!("Send text to {}", device.alias),
+        "Enter the message to send:",
+        "",
+    ) else {
+        return;
+    };
+    if text.is_empty() {
+        let _ = proxy.send_event(UiEvent::SendResult(Err(
+            "Message must not be empty.".to_string()
+        )));
+        return;
+    }
+
+    rt.spawn(async move {
+        let result = lsend_core::send::send_files(
+            &config,
+            &identity,
+            &device.ip,
+            &[],
+            /* text_stdin */ false,
+            /* message */ Some(&text),
+            /* clipboard */ false,
+            /* pin */ None,
+            /* no_scan */ true,
+            lsend_core::output::OutputOptions::new(false, true),
+        )
+        .await;
+
+        let payload = match result {
+            Ok(_) => Ok(format!("message to {}", device.alias)),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        let _ = proxy.send_event(UiEvent::SendResult(payload));
+    });
+}
+
+fn find_device(
+    devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
+    device_key: &str,
+) -> Option<DiscoveredDevice> {
+    let guard = devices.lock();
+    guard
+        .iter()
+        .find(|device| tray::device_key(device) == device_key)
+        .cloned()
+}
+
+fn report_missing_device(proxy: &tao::event_loop::EventLoopProxy<UiEvent>) {
+    let _ = proxy.send_event(UiEvent::SendResult(Err(
+        "Selected device is no longer available.".to_string(),
+    )));
+}
+
+fn copy_last_message(last_message: &Arc<Mutex<Option<String>>>) {
+    let text = last_message.lock().clone();
+    let Some(text) = text else {
+        notify_status("No received message is available to copy.");
+        return;
+    };
+
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
+        Ok(()) => notify_status("Copied the last received message."),
+        Err(e) => notify_error(&format!("Could not copy message: {e}")),
+    }
 }
 
 fn notify_status(body: &str) {

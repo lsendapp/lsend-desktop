@@ -21,6 +21,10 @@ pub struct AppState {
     /// Latest scan result. Locks are very brief (menu rebuilds + lookups by
     /// tray index), so a plain `Mutex` is fine.
     pub devices: Arc<Mutex<Vec<DiscoveredDevice>>>,
+    /// Full text of the most recently received message. The tray reads a clone
+    /// before touching the system clipboard, so the lock is never held across
+    /// an OS call.
+    pub last_message: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -34,6 +38,7 @@ impl AppState {
             config: Arc::new(config),
             identity: Arc::new(identity),
             devices: Arc::new(Mutex::new(Vec::new())),
+            last_message: Arc::new(Mutex::new(None)),
         })
     }
 }
