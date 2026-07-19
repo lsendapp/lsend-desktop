@@ -197,9 +197,10 @@ jobs:
         run: |
           set -euo pipefail
           # APPLE_API_KEY_CONTENT is the base64 encoding of the .p8 file
-          # downloaded from App Store Connect (the .p8 itself is PEM text).
-          # Mirrors lsendapp/cli and chatshell-desktop verbatim.
-          printf '%s' "$APPLE_API_KEY_CONTENT" | base64 -d > api_key.p8
+          # downloaded from App Store Connect. Verbatim from lsendapp/cli
+          # release.yml (proven working in cli v0.1.0 release: notarytool
+          # returned status=Accepted).
+          echo "${{ secrets.APPLE_API_KEY_CONTENT }}" | base64 -d > api_key.p8
           chmod 600 api_key.p8
           # Diagnostic: the decoded file must be PEM text. The header line
           # is not secret, so we can log it to help debug format issues.
@@ -209,8 +210,10 @@ jobs:
             echo "::error::Decoded APPLE_API_KEY_CONTENT is not PEM text."
             echo "First line should be '-----BEGIN PRIVATE KEY-----' but got:"
             head -1 api_key.p8
-            echo "APPLE_API_KEY_CONTENT must be the base64 of the .p8 file"
-            echo "as downloaded from App Store Connect. Generate with:"
+            echo ""
+            echo "lsendapp/cli v0.1.0 release notarization succeeded with the"
+            echo "same base64 -d logic, so this secret's content differs from"
+            echo "cli's. Re-create it from the SAME .p8 file used for cli:"
             echo "  base64 -i AuthKey_XXXXXXXXXX.p8   # macOS"
             echo "  base64 -w 0 AuthKey_XXXXXXXXXX.p8  # Linux"
             exit 1
