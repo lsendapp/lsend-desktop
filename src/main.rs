@@ -5,7 +5,7 @@
 //! submenu via a native file picker. macOS menu bar / Windows system tray.
 //!
 //! Threading layout:
-//! - **Main thread**: tao event loop + tray icon. m02/// │ muda menu events arrive
+//! - **Main thread**: tao event loop + tray icon. muda menu events arrive
 //!   here via a global channel; UI events from background tasks arrive here via
 //!   the tao `EventLoopProxy`.
 //! - **Background tokio runtime**: receiver supervisor + scanner + send tasks.
@@ -70,7 +70,6 @@ fn main() -> Result<()> {
     // Build tao event loop with a custom user-event type so background tasks
     // can wake the loop via the EventLoopProxy.
     let mut event_loop_builder = EventLoopBuilder::<UiEvent>::with_user_event();
-    let _ = &mut event_loop_builder; // keep borrow live until build
     let mut event_loop: EventLoop<UiEvent> = event_loop_builder.build();
     // Tray-only: hide from the macOS Dock, don't grab focus on launch.
     // (No-op on Windows / Linux.)
@@ -207,8 +206,11 @@ fn main() -> Result<()> {
                         rt_handle.spawn(async move { h.stop().await });
                     }
                     scanner_handle.abort();
-                    // Break the event loop; tao's `run` then unwinds.
-                    *control_flow = ControlFlow::Exit;
+                    // Exit immediately rather than going through tao's
+                    // LoopDestroyed teardown: muda 0.16 panics on icon
+                    // conversion (ZeroWidth) during NSApplication shutdown.
+                    // The OS reclaims sockets and files on process exit.
+                    std::process::exit(0);
                 }
                 TrayAction::Ignored => {}
             }
@@ -258,7 +260,10 @@ fn main() -> Result<()> {
                         &config_ref.receive_dir,
                     );
                 }
-                UiEvent::DevicesRefreshed { .. } => {
+                UiEvent::DevicesRefreshed { err } => {
+                    if let Some(msg) = err {
+                        tracing::warn!("device scan failed: {msg}");
+                    }
                     rebuild_menu(
                         &tray_ref,
                         &devices_ref,
@@ -336,9 +341,11 @@ fn main() -> Result<()> {
                 &tray_anim,
             );
         }
-        *control_flow = anim_deadline
-            .map(ControlFlow::WaitUntil)
-            .unwrap_or(ControlFlow::Wait);
+        if !matches!(*control_flow, ControlFlow::ExitWithCode(_)) {
+            *control_flow = anim_deadline
+                .map(ControlFlow::WaitUntil)
+                .unwrap_or(ControlFlow::Wait);
+        }
 
         // Suppress unused-warning on `target` while still allowing future
         // EventLoopWindowTarget queries (e.g. hide_application on macOS).
@@ -443,8 +450,8 @@ fn handle_receive_event(
     receive_dir: &Path,
 ) {
     match ev {
-        ReceiveEvent::Ready { .. } => {
-            notify_status("Receiver ready on port 53317");
+        ReceiveEvent::Ready { port, .. } => {
+            notify_status(&format!("Receiver ready on port {port}"));
         }
         ReceiveEvent::TransferStarted { sender_alias, .. } => {
             notify_state.begin_file_transfer(sender_alias);

@@ -18,6 +18,7 @@ use lsend_core::config::AppConfig;
 use lsend_core::identity::Identity;
 use lsend_core::output::OutputMode;
 use lsend_core::receive;
+use lsend_core::events::ReceiveEvent;
 
 use crate::state::UiEvent;
 
@@ -76,11 +77,20 @@ pub fn spawn(
             let _ = tokio_stop_tx.send(());
         });
 
+        let mut received_shutdown = false;
         while let Some(ev) = event_rx.recv().await {
+            if matches!(ev, ReceiveEvent::Shutdown) {
+                received_shutdown = true;
+            }
             let _ = proxy.send_event(UiEvent::Receive(ev));
         }
-        // event_rx closed → supervisor done. Let the bridge exit too.
+        // event_rx closed -> supervisor done. Let the bridge exit too.
         bridge.abort();
+        if !received_shutdown {
+            let _ = proxy.send_event(UiEvent::ReceiverError(
+                "Receiver stopped unexpectedly".to_string(),
+            ));
+        }
     });
 
     ReceiverHandle {

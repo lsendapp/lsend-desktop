@@ -46,7 +46,6 @@ impl AppState {
 /// Cross-thread events delivered into the tao event loop via `EventLoopProxy`.
 /// Background tokio tasks `send_event` these; the main loop matches on them.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // some fields are surfaced only in logs later
 pub enum UiEvent {
     Receive(ReceiveEvent),
     /// The background scan loop refreshed `AppState::devices` (or scan

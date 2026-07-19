@@ -17,7 +17,6 @@ use tokio::task::JoinHandle;
 use lsend_core::config::AppConfig;
 use lsend_core::discovery;
 use lsend_core::identity::Identity;
-use lsend_core::output::OutputOptions;
 
 use crate::state::UiEvent;
 
@@ -50,10 +49,6 @@ pub fn spawn(
 ) -> ScannerHandle {
     let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
     let join = rt.spawn(async move {
-        // OutputOptions deliberately unused: scan returns devices, we don't
-        // print human text. Pass a quiet human mode.
-        let _output = OutputOptions::new(false, true);
-
         loop {
             // Passive scanning shares immutable config and identity references;
             // it never competes with the resident receiver for the TCP port.
