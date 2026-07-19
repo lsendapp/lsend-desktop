@@ -10,8 +10,7 @@
 # Usage:
 #   scripts/make-app-bundle.sh              # build release bundle
 #   scripts/make-app-bundle.sh release      # explicit profile
-#   scripts/make-app-bundle.sh debug        # debug profile
-#   scripts/make-app-bundle.sh run          # build + `open` the bundle
+#   scripts/make-app-bundle.sh universal  # universal (arm64+intel) release bundle
 #
 # Output: dist/lsend-desktop.app
 #
@@ -26,8 +25,8 @@ PROFILE="$REQUESTED_PROFILE"
 
 # Validate profile before doing any work.
 case "$PROFILE" in
-  release|debug|run) ;;
-  *) echo "usage: $0 [release|debug|run]"; exit 64 ;;
+  release|debug|run|universal) ;;
+  *) echo "usage: $0 [release|debug|run|universal]"; exit 64 ;;
 esac
 
 # `cargo build` only knows about release/debug; `run` means "build the bundle
@@ -39,7 +38,30 @@ fi
 
 # Build the requested profile every time so the bundle always contains the
 # current source rather than whichever binary happened to exist already.
-if [ "$PROFILE" = "release" ]; then
+#
+# `universal` builds aarch64-apple-darwin and x86_64-apple-darwin separately
+# then merges them with `lipo` into a fat Mach-O at the same path a plain
+# `release` build would use, so the rest of the script (BIN_PATH lookup,
+# bundle copy, icon, plist) works unchanged. The host toolchain must already
+# have both targets installed (`rustup target add aarch64-apple-darwin
+# x86_64-apple-darwin`).
+if [ "$PROFILE" = "universal" ]; then
+  cargo build --release --target aarch64-apple-darwin --bin lsend-desktop
+  cargo build --release --target x86_64-apple-darwin --bin lsend-desktop
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    UNIVERSAL_OUT="$CARGO_TARGET_DIR/release/lsend-desktop"
+    ARM_BIN="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/lsend-desktop"
+    X86_BIN="$CARGO_TARGET_DIR/x86_64-apple-darwin/release/lsend-desktop"
+  else
+    UNIVERSAL_OUT="../target/release/lsend-desktop"
+    ARM_BIN="../target/aarch64-apple-darwin/release/lsend-desktop"
+    X86_BIN="../target/x86_64-apple-darwin/release/lsend-desktop"
+  fi
+  mkdir -p "$(dirname "$UNIVERSAL_OUT")"
+  lipo -create -output "$UNIVERSAL_OUT" "$ARM_BIN" "$X86_BIN"
+  lipo -info "$UNIVERSAL_OUT"
+  PROFILE="release"
+elif [ "$PROFILE" = "release" ]; then
   cargo build --release --bin lsend-desktop
 else
   cargo build --bin lsend-desktop
@@ -58,6 +80,8 @@ fi
 BUNDLE_DIR="dist/lsend-desktop.app"
 BUNDLE_BIN_DIR="$BUNDLE_DIR/Contents/MacOS"
 BUNDLE_RES_DIR="$BUNDLE_DIR/Contents/Resources"
+APP_ICON_PNG="assets/app-icon.png"
+APP_ICON_ICNS="$BUNDLE_RES_DIR/AppIcon.icns"
 
 # Re-create the bundle on every run so we don't ship a half-updated app.
 rm -rf "$BUNDLE_DIR"
@@ -67,9 +91,41 @@ mkdir -p "$BUNDLE_BIN_DIR" "$BUNDLE_RES_DIR"
 # the Cargo target directory is cleaned, or when the app is distributed.
 install -m 755 "$BIN_PATH" "$BUNDLE_BIN_DIR/lsend-desktop"
 
+if [ ! -f "$APP_ICON_PNG" ]; then
+  echo "missing $APP_ICON_PNG (1024x1024 PNG required for the app bundle icon)" >&2
+  exit 1
+fi
+
+ICONSET_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/lsend-icon.XXXXXX")"
+ICONSET="$ICONSET_ROOT/AppIcon.iconset"
+mkdir "$ICONSET"
+cleanup_iconset() { rm -rf "$ICONSET_ROOT"; }
+trap cleanup_iconset EXIT
+
+make_icon() {
+  local size="$1"
+  local name="$2"
+  sips -z "$size" "$size" "$APP_ICON_PNG" --out "$ICONSET/$name" >/dev/null
+}
+
+make_icon 16 icon_16x16.png
+make_icon 32 icon_16x16@2x.png
+make_icon 32 icon_32x32.png
+make_icon 64 icon_32x32@2x.png
+make_icon 128 icon_128x128.png
+make_icon 256 icon_128x128@2x.png
+make_icon 256 icon_256x256.png
+make_icon 512 icon_256x256@2x.png
+make_icon 512 icon_512x512.png
+make_icon 1024 icon_512x512@2x.png
+iconutil -c icns "$ICONSET" -o "$APP_ICON_ICNS"
+
 # Minimal Info.plist. The `LSUIElement` flag is the macOS equivalent of our
 # tao `ActivationPolicy::Accessory`: hide dock icon, menu-bar only.
-cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
+#
+# Version strings honour the `LSEND_VERSION` env var (set by CI from the
+# release tag); default `0.1.0` if unset so local builds keep working.
+cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -77,9 +133,10 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key>            <string>LSend</string>
   <key>CFBundleDisplayName</key>     <string>LSend</string>
   <key>CFBundleExecutable</key>      <string>lsend-desktop</string>
+  <key>CFBundleIconFile</key>       <string>AppIcon</string>
   <key>CFBundleIdentifier</key>      <string>app.lsend.desktop</string>
-  <key>CFBundleVersion</key>         <string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key>         <string>${LSEND_VERSION:-0.1.0}</string>
+  <key>CFBundleShortVersionString</key><string>${LSEND_VERSION:-0.1.0}</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>
   <key>CFBundleSignature</key>       <string>????</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>

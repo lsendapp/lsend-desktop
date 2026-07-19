@@ -1,0 +1,276 @@
+# Build & Release lsend-desktop for macOS (universal arm64 + x86_64).
+#
+# Triggers:
+#   - push tag matching 'v*'        -> publish GitHub Release for that tag
+#   - workflow_dispatch (manual)    -> build + upload artifacts (no release unless tag)
+#
+# Required secrets (all six -- code signing + notarization are mandatory;
+# the build-macos job fails fast if any is missing):
+#   APPLE_CERTIFICATE              Base64-encoded .p12 (Developer ID Application)
+#   APPLE_CERTIFICATE_PASSWORD     .p12 password
+#   APPLE_TEAM_ID                  10-char Apple Developer Team ID
+#   APPLE_API_KEY_CONTENT          Base64-encoded .p8 (App Store Connect API key)
+#   APPLE_API_KEY                  API Key ID (10 chars)
+#   APPLE_API_ISSUER               API Issuer ID (UUID)
+#
+# Layout note: lsend-desktop's Cargo.toml uses `version.workspace = true` and a
+# `lsend-cli = { path = "../cli" }` path dependency, both of which need a parent
+# workspace + the lsendapp/cli source tree. We synthesize that layout in CI by
+# checking out both repos under a shared root and writing a tiny `[workspace]`
+# Cargo.toml at that root, mirroring the local monorepo exactly.
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    name: Build macOS (universal)
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - name: Verify Apple signing + notarization secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "$APPLE_CERTIFICATE" ]          && missing+=("APPLE_CERTIFICATE")
+          [ -z "$APPLE_CERTIFICATE_PASSWORD" ] && missing+=("APPLE_CERTIFICATE_PASSWORD")
+          [ -z "$APPLE_TEAM_ID" ]              && missing+=("APPLE_TEAM_ID")
+          [ -z "$APPLE_API_KEY_CONTENT" ]      && missing+=("APPLE_API_KEY_CONTENT")
+          [ -z "$APPLE_API_KEY" ]              && missing+=("APPLE_API_KEY")
+          [ -z "$APPLE_API_ISSUER" ]           && missing+=("APPLE_API_ISSUER")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required Apple secrets: ${missing[*]}"
+            echo "Code signing + notarization are mandatory for this workflow."
+            echo "Add the listed secrets under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "All 6 Apple secrets present."
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-ci-$(echo "$GITHUB_SHA" | cut -c1-8)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Checkout desktop repository
+        uses: actions/checkout@v4
+        with:
+          path: desktop
+
+      - name: Checkout CLI repository
+        uses: actions/checkout@v4
+        with:
+          repository: lsendapp/cli
+          path: cli
+          fetch-depth: 1
+
+      - name: Synthesize workspace manifest
+        run: |
+          set -euo pipefail
+          cat > Cargo.toml <<EOF
+          [workspace]
+          resolver = "2"
+          members = ["cli", "desktop"]
+          exclude = ["cli/vendor/**"]
+
+          [workspace.package]
+          edition = "2024"
+          license = "Apache-2.0"
+          version = "${{ steps.ver.outputs.version }}"
+          EOF
+          echo "--- workspace Cargo.toml ---"
+          cat Cargo.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      # apple-actions/import-codesign-certs@v2 creates + unlocks a temporary
+      # keychain and imports the P12 so /usr/bin/codesign can use the key
+      # without a passphrase prompt. No manual keychain manipulation needed.
+      - name: Import signing certificate
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Verify signing identity is visible to codesign
+        run: |
+          set -euo pipefail
+          if ! security find-identity -p codesigning -v \
+               | grep -q '"Developer ID Application:'; then
+            echo "::error::No Developer ID Application identity in keychain."
+            echo "Check that APPLE_CERTIFICATE is a Developer ID Application"
+            echo ".p12 (not a Mac Distribution / Apple Development cert)."
+            security find-identity -p codesigning -v 2>&1 || true
+            exit 1
+          fi
+          security find-identity -p codesigning -v
+
+      # Build a universal (arm64 + x86_64) .app bundle. The `universal`
+      # profile in make-app-bundle.sh builds both slices, merges them with
+      # lipo, wraps them in dist/lsend-desktop.app with an .icns + Info.plist.
+      - name: Build universal .app bundle
+        working-directory: desktop
+        env:
+          LSEND_VERSION: ${{ steps.ver.outputs.version }}
+          # Strip debug info, enable LTO + single codegen unit -> smaller binary.
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+        run: bash scripts/make-app-bundle.sh universal
+
+      - name: Codesign .app bundle
+        run: |
+          set -euo pipefail
+          IDENTITY=$(security find-identity -p codesigning -v \
+            | grep -o '"Developer ID Application: [^"]*"' \
+            | head -n1 \
+            | tr -d '"')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in keychain"
+            exit 1
+          fi
+          echo "Using identity: $IDENTITY"
+          codesign --force --deep \
+            --sign "$IDENTITY" \
+            --options runtime --timestamp \
+            desktop/dist/lsend-desktop.app
+          codesign --verify --verbose=2 desktop/dist/lsend-desktop.app
+
+      # Build a drag-to-Applications DMG. Including the /Applications symlink
+      # gives users the standard "drag the app into Applications" UX.
+      - name: Create DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          STAGING="dmg-staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R desktop/dist/lsend-desktop.app "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+          DMG_NAME="lsend-desktop-${{ steps.ver.outputs.version }}-universal.dmg"
+          hdiutil create \
+            -volname "LSend" \
+            -fs HFS+ \
+            -srcfolder "$STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG_NAME"
+          rm -rf "$STAGING"
+          echo "path=$DMG_NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "$DMG_NAME"
+
+      - name: Setup notarization API key
+        run: echo "${{ secrets.APPLE_API_KEY_CONTENT }}" | base64 -d > api_key.p8
+
+      - name: Notarize and staple DMG
+        run: |
+          set -euo pipefail
+          DMG="${{ steps.dmg.outputs.path }}"
+          xcrun notarytool submit "$DMG" \
+            --key api_key.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY }}" \
+            --issuer "${{ secrets.APPLE_API_ISSUER }}" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: Cleanup API key
+        if: always()
+        run: rm -f api_key.p8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsend-desktop-macos-universal
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: build-macos
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sha256sum -- *.dmg > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            artifacts/*.dmg
+            artifacts/SHA256SUMS
+          fail_on_unmatched_files: true
+          body: |
+            ## Installation
+
+            Download `lsend-desktop-<version>-universal.dmg`, open it, and
+            drag **LSend** into your **Applications** folder. The app runs as
+            a menu-bar accessory -- no Dock icon.
+
+            ### Verifying
+
+            The `SHA256SUMS` file in this release lists the SHA-256 of every
+            DMG. Verify a download with:
+
+            ```bash
+            shasum -a 256 lsend-desktop-*-universal.dmg
+            # compare against the matching line in SHA256SUMS
+            ```
+
+            ### macOS Gatekeeper
+
+            Every DMG in this release is signed with a Developer ID
+            Application certificate and notarized with Apple, so it opens
+            without Gatekeeper warnings on macOS 11+.
