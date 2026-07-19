@@ -556,24 +556,24 @@ fn handle_send_file(
 
     let _ = proxy.send_event(UiEvent::TransferStarted);
 
-    let config2 = config;
-    let identity2 = identity;
     let device_label = device.alias.clone();
     let device_ip = device.ip.clone();
     let count = path_strings.len();
-    let proxy = proxy;
 
     rt.spawn(async move {
+        let request = lsend_core::send::SendRequest {
+            target: &device_ip,
+            paths: &path_strings,
+            text_stdin: false,
+            message: None,
+            clipboard: false,
+            pin: None,
+            no_scan: true,
+        };
         let result = lsend_core::send::send_files(
-            &config2,
-            &identity2,
-            &device_ip,
-            &path_strings,
-            /* text_stdin */ false,
-            /* message */ None,
-            /* clipboard */ false,
-            /* pin */ None,
-            /* no_scan */ true,
+            &config,
+            &identity,
+            &request,
             lsend_core::output::OutputOptions::new(false, true),
         )
         .await;
@@ -617,16 +617,19 @@ fn handle_send_text(
     let _ = proxy.send_event(UiEvent::TransferStarted);
 
     rt.spawn(async move {
+        let request = lsend_core::send::SendRequest {
+            target: &device.ip,
+            paths: &[],
+            text_stdin: false,
+            message: Some(&text),
+            clipboard: false,
+            pin: None,
+            no_scan: true,
+        };
         let result = lsend_core::send::send_files(
             &config,
             &identity,
-            &device.ip,
-            &[],
-            /* text_stdin */ false,
-            /* message */ Some(&text),
-            /* clipboard */ false,
-            /* pin */ None,
-            /* no_scan */ true,
+            &request,
             lsend_core::output::OutputOptions::new(false, true),
         )
         .await;
