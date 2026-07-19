@@ -201,6 +201,20 @@ jobs:
           # Mirrors lsendapp/cli and chatshell-desktop verbatim.
           printf '%s' "$APPLE_API_KEY_CONTENT" | base64 -d > api_key.p8
           chmod 600 api_key.p8
+          # Diagnostic: the decoded file must be PEM text. The header line
+          # is not secret, so we can log it to help debug format issues.
+          echo "Decoded api_key.p8: $(wc -c < api_key.p8) bytes"
+          echo "First line: $(head -1 api_key.p8)"
+          if ! head -1 api_key.p8 | grep -q 'BEGIN.*PRIVATE KEY'; then
+            echo "::error::Decoded APPLE_API_KEY_CONTENT is not PEM text."
+            echo "First line should be '-----BEGIN PRIVATE KEY-----' but got:"
+            head -1 api_key.p8
+            echo "APPLE_API_KEY_CONTENT must be the base64 of the .p8 file"
+            echo "as downloaded from App Store Connect. Generate with:"
+            echo "  base64 -i AuthKey_XXXXXXXXXX.p8   # macOS"
+            echo "  base64 -w 0 AuthKey_XXXXXXXXXX.p8  # Linux"
+            exit 1
+          fi
 
       - name: Notarize and staple DMG
         run: |
