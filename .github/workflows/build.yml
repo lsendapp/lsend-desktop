@@ -9,7 +9,7 @@
 #   APPLE_CERTIFICATE              Base64-encoded .p12 (Developer ID Application)
 #   APPLE_CERTIFICATE_PASSWORD     .p12 password
 #   APPLE_TEAM_ID                  10-char Apple Developer Team ID
-#   APPLE_API_KEY_CONTENT          Base64-encoded .p8 (App Store Connect API key)
+#   APPLE_API_KEY_CONTENT          Base64 of the .p8 file as downloaded from App Store Connect (the .p8 is PEM text; generate with `base64 -i AuthKey.p8`)
 #   APPLE_API_KEY                  API Key ID (10 chars)
 #   APPLE_API_ISSUER               API Issuer ID (UUID)
 #
@@ -196,27 +196,11 @@ jobs:
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: |
           set -euo pipefail
-          # APPLE_API_KEY_CONTENT may be either the raw PEM text of the .p8
-          # (starting with '-----BEGIN PRIVATE KEY-----') or its base64
-          # encoding. Detect which and write a valid PEM to api_key.p8.
-          if printf '%s' "$APPLE_API_KEY_CONTENT" | grep -q 'BEGIN PRIVATE KEY'; then
-            printf '%s\n' "$APPLE_API_KEY_CONTENT" > api_key.p8
-          else
-            printf '%s' "$APPLE_API_KEY_CONTENT" | base64 -d > api_key.p8
-          fi
-          # Fail fast with a clear message if the result isn't a usable key,
-          # rather than letting notarytool fail later with invalidPrivateKeyContents.
-          if ! openssl pkey -in api_key.p8 -noout 2>/dev/null; then
-            echo "::error::APPLE_API_KEY_CONTENT did not decode to a valid PEM private key."
-            echo "Expected either:"
-            echo "  - the raw .p8 contents (PEM text starting with '-----BEGIN PRIVATE KEY-----')"
-            echo "  - or the base64 encoding of the .p8 file"
-            echo "First line of what we wrote:"
-            head -1 api_key.p8 >&2 || true
-            exit 1
-          fi
+          # APPLE_API_KEY_CONTENT is the base64 encoding of the .p8 file
+          # downloaded from App Store Connect (the .p8 itself is PEM text).
+          # Mirrors lsendapp/cli and chatshell-desktop verbatim.
+          printf '%s' "$APPLE_API_KEY_CONTENT" | base64 -d > api_key.p8
           chmod 600 api_key.p8
-          echo "API key written and validated ($(wc -c < api_key.p8) bytes)."
 
       - name: Notarize and staple DMG
         run: |
