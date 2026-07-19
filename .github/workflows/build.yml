@@ -139,7 +139,7 @@ jobs:
 
       # Build a universal (arm64 + x86_64) .app bundle. The `universal`
       # profile in make-app-bundle.sh builds both slices, merges them with
-      # lipo, wraps them in dist/lsend-desktop.app with an .icns + Info.plist.
+      # lipo, wraps them in dist/LSend.app with an .icns + Info.plist.
       - name: Build universal .app bundle
         working-directory: desktop
         env:
@@ -165,8 +165,8 @@ jobs:
           codesign --force --deep \
             --sign "$IDENTITY" \
             --options runtime --timestamp \
-            desktop/dist/lsend-desktop.app
-          codesign --verify --verbose=2 desktop/dist/lsend-desktop.app
+            desktop/dist/LSend.app
+          codesign --verify --verbose=2 desktop/dist/LSend.app
 
       # Build a drag-to-Applications DMG. Including the /Applications symlink
       # gives users the standard "drag the app into Applications" UX.
@@ -177,9 +177,9 @@ jobs:
           STAGING="dmg-staging"
           rm -rf "$STAGING"
           mkdir -p "$STAGING"
-          cp -R desktop/dist/lsend-desktop.app "$STAGING/"
+          cp -R desktop/dist/LSend.app "$STAGING/"
           ln -s /Applications "$STAGING/Applications"
-          DMG_NAME="lsend-desktop-${{ steps.ver.outputs.version }}-universal.dmg"
+          DMG_NAME="LSend-${{ steps.ver.outputs.version }}-universal.dmg"
           hdiutil create \
             -volname "LSend" \
             -fs HFS+ \
@@ -213,7 +213,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lsend-desktop-macos-universal
+          name: LSend-macos-universal
           path: ${{ steps.dmg.outputs.path }}
           if-no-files-found: error
           retention-days: 7
@@ -255,7 +255,7 @@ jobs:
           body: |
             ## Installation
 
-            Download `lsend-desktop-<version>-universal.dmg`, open it, and
+            Download `LSend-<version>-universal.dmg`, open it, and
             drag **LSend** into your **Applications** folder. The app runs as
             a menu-bar accessory -- no Dock icon.
 
@@ -265,7 +265,7 @@ jobs:
             DMG. Verify a download with:
 
             ```bash
-            shasum -a 256 lsend-desktop-*-universal.dmg
+            shasum -a 256 LSend-*-universal.dmg
             # compare against the matching line in SHA256SUMS
             ```
 

@@ -12,7 +12,7 @@
 #   scripts/make-app-bundle.sh release      # explicit profile
 #   scripts/make-app-bundle.sh universal  # universal (arm64+intel) release bundle
 #
-# Output: dist/lsend-desktop.app
+# Output: dist/LSend.app
 #
 # Tested on macOS 14+ (uses NSStatusItem-backed accessory activation policy).
 
@@ -77,7 +77,7 @@ else
   BIN_PATH="../target/$PROFILE/lsend-desktop"
 fi
 
-BUNDLE_DIR="dist/lsend-desktop.app"
+BUNDLE_DIR="dist/LSend.app"
 BUNDLE_BIN_DIR="$BUNDLE_DIR/Contents/MacOS"
 BUNDLE_RES_DIR="$BUNDLE_DIR/Contents/Resources"
 APP_ICON_PNG="assets/app-icon.png"
