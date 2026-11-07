@@ -6,8 +6,9 @@
 //! convenience for the tray submenu, not a real-time requirement. The scan is
 //! uses passive discovery because the resident receiver owns port 53317.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
@@ -22,15 +23,21 @@ use crate::state::UiEvent;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const SCAN_TIMEOUT_MS: u64 = 1500;
+const DEVICE_TTL: Duration = Duration::from_secs(60);
 
 pub struct ScannerHandle {
     join: JoinHandle<()>,
     refresh: mpsc::UnboundedSender<()>,
+    registrations: mpsc::UnboundedSender<discovery::DiscoveredDevice>,
 }
 
 impl ScannerHandle {
     pub fn refresh(&self) {
         let _ = self.refresh.send(());
+    }
+
+    pub fn register(&self, device: discovery::DiscoveredDevice) {
+        let _ = self.registrations.send(device);
     }
 
     pub fn abort(&self) {
@@ -48,38 +55,48 @@ pub fn spawn(
     proxy: tao::event_loop::EventLoopProxy<UiEvent>,
 ) -> ScannerHandle {
     let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
+    let (registrations, mut registration_rx) = mpsc::unbounded_channel();
     let join = rt.spawn(async move {
+        let mut cache = DeviceCache::default();
         loop {
-            // Passive scanning shares immutable config and identity references;
-            // it never competes with the resident receiver for the TCP port.
-            let result = discovery::scan_passive(&config, &identity, SCAN_TIMEOUT_MS).await;
-
-            match result {
-                Ok(mut devices_list) => {
-                    // Sort by alias then ip for stable tray ordering.
-                    devices_list
-                        .sort_by(|a, b| a.alias.cmp(&b.alias).then_with(|| a.ip.cmp(&b.ip)));
-                    // Dedup by (ip, port, fingerprint); keep first after sort.
-                    let mut seen = std::collections::HashSet::new();
-                    devices_list
-                        .retain(|d| seen.insert((d.ip.clone(), d.port, d.fingerprint.clone())));
-                    let mut guard = devices.lock();
-                    *guard = devices_list;
-                    drop(guard);
-                    let _ = proxy.send_event(UiEvent::DevicesRefreshed { err: None });
+            let scan = discovery::scan_passive(&config, &identity, SCAN_TIMEOUT_MS);
+            tokio::pin!(scan);
+            // HTTP registrations arrive while the UDP scan is in progress.
+            let result = loop {
+                tokio::select! {
+                    result = &mut scan => break result,
+                    Some(device) = registration_rx.recv() => {
+                        cache.observe(device, Instant::now());
+                        *devices.lock() = cache.current(Instant::now());
+                        let _ = proxy.send_event(UiEvent::DevicesRefreshed { err: None });
+                    }
                 }
-                Err(e) => {
-                    let _ = proxy.send_event(UiEvent::DevicesRefreshed {
-                        err: Some(e.to_string()),
-                    });
+            };
+            let err = match result {
+                Ok(found) => {
+                    for device in found {
+                        cache.observe(device, Instant::now());
+                    }
+                    None
                 }
-            }
+                Err(e) => Some(e.to_string()),
+            };
+            *devices.lock() = cache.current(Instant::now());
+            let _ = proxy.send_event(UiEvent::DevicesRefreshed { err });
 
-            tokio::select! {
-                _ = tokio::time::sleep(SCAN_INTERVAL) => {}
-                refresh = refresh_rx.recv() => {
-                    if refresh.is_none() {
+            let delay = tokio::time::sleep(SCAN_INTERVAL);
+            tokio::pin!(delay);
+            loop {
+                tokio::select! {
+                    _ = &mut delay => break,
+                    refresh = refresh_rx.recv() => {
+                        if refresh.is_none() { return; }
                         break;
+                    }
+                    Some(device) = registration_rx.recv() => {
+                        cache.observe(device, Instant::now());
+                        *devices.lock() = cache.current(Instant::now());
+                        let _ = proxy.send_event(UiEvent::DevicesRefreshed { err: None });
                     }
                 }
             }
@@ -89,5 +106,64 @@ pub fn spawn(
     ScannerHandle {
         join,
         refresh: refresh_tx,
+        registrations,
+    }
+}
+
+/// Merge UDP observations and HTTP registrations; expire peers only after a
+/// quiet period so a scan cannot erase a registration it did not observe.
+#[derive(Default)]
+struct DeviceCache {
+    peers: HashMap<String, (discovery::DiscoveredDevice, Instant)>,
+}
+
+impl DeviceCache {
+    fn observe(&mut self, device: discovery::DiscoveredDevice, now: Instant) {
+        self.peers
+            .insert(crate::tray::device_key(&device), (device, now));
+    }
+
+    fn current(&mut self, now: Instant) -> Vec<discovery::DiscoveredDevice> {
+        self.peers
+            .retain(|_, (_, seen)| now.duration_since(*seen) < DEVICE_TTL);
+        let mut peers: Vec<_> = self
+            .peers
+            .values()
+            .map(|(device, _)| device.clone())
+            .collect();
+        peers.sort_by(|a, b| a.alias.cmp(&b.alias).then_with(|| a.ip.cmp(&b.ip)));
+        peers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registrations_survive_empty_scans_and_expire_after_silence() {
+        let now = Instant::now();
+        let mut cache = DeviceCache::default();
+        cache.observe(
+            discovery::DiscoveredDevice {
+                alias: "Peer".into(),
+                ip: "192.168.1.10".into(),
+                port: 6000,
+                https: false,
+                fingerprint: "fp".into(),
+                version: "2.1".into(),
+                device_type: None,
+                device_model: None,
+            },
+            now,
+        );
+        assert_eq!(cache.current(now + SCAN_INTERVAL).len(), 1);
+        let mut peer = cache.current(now)[0].clone();
+        peer.alias = "Renamed".into();
+        cache.observe(peer, now + SCAN_INTERVAL);
+        let peers = cache.current(now + DEVICE_TTL);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].alias, "Renamed");
+        assert!(cache.current(now + DEVICE_TTL + SCAN_INTERVAL).is_empty());
     }
 }

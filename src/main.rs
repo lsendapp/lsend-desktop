@@ -123,13 +123,18 @@ fn main() -> Result<()> {
 
     let mut receiver_status = ReceiverStatus::Starting;
     let mut receive_notify_state = ReceiveNotifyState::default();
+    let mut quit_requested = false;
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         // 1) Tray menu events (muda global channel).
         if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
             let id = menu_event.id.0.as_str().to_string();
-            let action = tray::parse_action(&id);
+            let action = if quit_requested {
+                TrayAction::Ignored
+            } else {
+                tray::parse_action(&id)
+            };
             match action {
                 TrayAction::SendFile(device_key) => {
                     handle_send_file(
@@ -202,15 +207,26 @@ fn main() -> Result<()> {
                 }
                 TrayAction::Quit => {
                     info!("quit requested");
-                    if let Some(h) = rx_handle.take() {
-                        rt_handle.spawn(async move { h.stop().await });
-                    }
+                    quit_requested = true;
                     scanner_handle.abort();
-                    // Exit immediately rather than going through tao's
-                    // LoopDestroyed teardown: muda 0.16 panics on icon
-                    // conversion (ZeroWidth) during NSApplication shutdown.
-                    // The OS reclaims sockets and files on process exit.
-                    std::process::exit(0);
+                    if let Some(h) = rx_handle.take() {
+                        let stopped_proxy = proxy.clone();
+                        rt_handle.spawn(async move {
+                            h.stop().await;
+                            let _ = stopped_proxy.send_event(UiEvent::ReceiverStopped);
+                        });
+                        receiver_status = ReceiverStatus::Stopping;
+                    } else if receiver_status != ReceiverStatus::Stopping {
+                        std::process::exit(0);
+                    }
+                    rebuild_menu(
+                        &tray_ref,
+                        &devices_ref,
+                        &last_message_ref,
+                        receiver_status,
+                        &alias_ref,
+                        &tray_anim,
+                    );
                 }
                 TrayAction::Ignored => {}
             }
@@ -222,6 +238,9 @@ fn main() -> Result<()> {
                 UiEvent::Receive(ev) => {
                     let mut rebuild = false;
                     match &ev {
+                        ReceiveEvent::PeerDiscovered(device) => {
+                            scanner_handle.register(device.clone());
+                        }
                         ReceiveEvent::Ready { .. } => {
                             receiver_status = ReceiverStatus::Receiving;
                             rebuild = true;
@@ -254,11 +273,7 @@ fn main() -> Result<()> {
                             &tray_anim,
                         );
                     }
-                    handle_receive_event(
-                        ev,
-                        &mut receive_notify_state,
-                        &config_ref.receive_dir,
-                    );
+                    handle_receive_event(ev, &mut receive_notify_state, &config_ref.receive_dir);
                 }
                 UiEvent::DevicesRefreshed { err } => {
                     if let Some(msg) = err {
@@ -288,6 +303,11 @@ fn main() -> Result<()> {
                     notify_error(&msg);
                 }
                 UiEvent::ReceiverStopped => {
+                    if quit_requested {
+                        // Receiver connections have drained and partial files are removed.
+                        // Avoid muda shutdown teardown after that cleanup completes.
+                        std::process::exit(0);
+                    }
                     receiver_status = ReceiverStatus::Paused;
                     tray_anim.cancel_receiving();
                     rebuild_menu(
@@ -398,7 +418,7 @@ fn menu_receiver_status(
 ) -> ReceiverStatus {
     if animator.is_animating() {
         match receiver_status {
-            ReceiverStatus::Receiving | ReceiverStatus::Paused => ReceiverStatus::Transferring,
+            ReceiverStatus::Receiving => ReceiverStatus::Transferring,
             other => other,
         }
     } else {
@@ -515,6 +535,7 @@ fn handle_receive_event(
         ReceiveEvent::TransferCancelled => {
             notify_state.reset();
         }
+        ReceiveEvent::PeerDiscovered(_) => {}
         ReceiveEvent::Shutdown => {
             // Supervisor will surface any error separately via ReceiverError.
         }
@@ -570,11 +591,13 @@ fn handle_send_file(
             pin: None,
             no_scan: true,
         };
-        let result = lsend_core::send::send_files(
+        let result = lsend_core::send::send_files_to_device(
             &config,
             &identity,
             &request,
             lsend_core::output::OutputOptions::new(false, true),
+            &device,
+            "scan",
         )
         .await;
 
@@ -626,11 +649,13 @@ fn handle_send_text(
             pin: None,
             no_scan: true,
         };
-        let result = lsend_core::send::send_files(
+        let result = lsend_core::send::send_files_to_device(
             &config,
             &identity,
             &request,
             lsend_core::output::OutputOptions::new(false, true),
+            &device,
+            "scan",
         )
         .await;
 
@@ -696,5 +721,29 @@ fn notify_error(body: &str) {
         .show()
     {
         tracing::warn!("notification failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sending_does_not_hide_paused_receivers_resume_action() {
+        let mut animator = TrayAnimator::new(tray::load_icon_set().unwrap());
+        animator.begin_send();
+        assert_eq!(
+            menu_receiver_status(ReceiverStatus::Paused, &animator),
+            ReceiverStatus::Paused
+        );
+        assert_eq!(
+            menu_receiver_status(ReceiverStatus::Receiving, &animator),
+            ReceiverStatus::Transferring
+        );
+        animator.end_send();
+        assert_eq!(
+            menu_receiver_status(ReceiverStatus::Paused, &animator),
+            ReceiverStatus::Paused
+        );
     }
 }
