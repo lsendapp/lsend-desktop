@@ -5,9 +5,8 @@
 //! submenu via a native file picker. macOS menu bar / Windows system tray.
 //!
 //! Threading layout:
-//! - **Main thread**: tao event loop + tray icon. muda menu events arrive
-//!   here via a global channel; UI events from background tasks arrive here via
-//!   the tao `EventLoopProxy`.
+//! - **Main thread**: tao event loop + tray icon. Menu actions and background
+//!   updates wake this loop through the tao `EventLoopProxy`.
 //! - **Background tokio runtime**: receiver supervisor + scanner + send tasks.
 //!   They never touch the tray directly — they `send_event` back to main.
 
@@ -75,6 +74,11 @@ fn main() -> Result<()> {
     // (No-op on Windows / Linux.)
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
     let proxy = event_loop.create_proxy();
+    let menu_proxy = proxy.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let action = tray::parse_action(&event.id.0);
+        let _ = menu_proxy.send_event(UiEvent::MenuAction(action));
+    }));
 
     // Background tokio runtime. Lives for the whole process; receiver,
     // scanner, and ad-hoc send tasks all run on it.
@@ -127,13 +131,13 @@ fn main() -> Result<()> {
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
-        // 1) Tray menu events (muda global channel).
-        if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
-            let id = menu_event.id.0.as_str().to_string();
+        // Menu actions are delivered as user events instead of polling a
+        // separate channel that cannot wake ControlFlow::Wait.
+        if let tao::event::Event::UserEvent(UiEvent::MenuAction(action)) = &event {
             let action = if quit_requested {
                 TrayAction::Ignored
             } else {
-                tray::parse_action(&id)
+                action.clone()
             };
             match action {
                 TrayAction::SendFile(device_key) => {
@@ -235,6 +239,7 @@ fn main() -> Result<()> {
         // 2) User events from background tasks.
         if let tao::event::Event::UserEvent(ui) = event {
             match ui {
+                UiEvent::MenuAction(_) => {} // Handled above.
                 UiEvent::Receive(ev) => {
                     let mut rebuild = false;
                     match &ev {

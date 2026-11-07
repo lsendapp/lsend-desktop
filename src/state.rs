@@ -47,6 +47,8 @@ impl AppState {
 /// Background tokio tasks `send_event` these; the main loop matches on them.
 #[derive(Clone, Debug)]
 pub enum UiEvent {
+    /// Menu actions wake the main loop, including when no scans or transfers run.
+    MenuAction(crate::tray::TrayAction),
     Receive(ReceiveEvent),
     /// The background scan loop refreshed `AppState::devices` (or scan
     /// errored — check `err`).
