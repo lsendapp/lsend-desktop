@@ -124,7 +124,7 @@ iconutil -c icns "$ICONSET" -o "$APP_ICON_ICNS"
 # tao `ActivationPolicy::Accessory`: hide dock icon, menu-bar only.
 #
 # Version strings honour the `LSEND_VERSION` env var (set by CI from the
-# release tag); default `0.1.0` if unset so local builds keep working.
+# release tag); default `0.1.3` if unset so local builds keep working.
 cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -135,8 +135,8 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>      <string>lsend-desktop</string>
   <key>CFBundleIconFile</key>       <string>AppIcon</string>
   <key>CFBundleIdentifier</key>      <string>app.lsend.desktop</string>
-  <key>CFBundleVersion</key>         <string>${LSEND_VERSION:-0.1.0}</string>
-  <key>CFBundleShortVersionString</key><string>${LSEND_VERSION:-0.1.0}</string>
+  <key>CFBundleVersion</key>         <string>${LSEND_VERSION:-0.1.3}</string>
+  <key>CFBundleShortVersionString</key><string>${LSEND_VERSION:-0.1.3}</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>
   <key>CFBundleSignature</key>       <string>????</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
