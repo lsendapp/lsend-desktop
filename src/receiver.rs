@@ -15,10 +15,10 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use lsend_core::config::AppConfig;
+use lsend_core::events::ReceiveEvent;
 use lsend_core::identity::Identity;
 use lsend_core::output::OutputMode;
 use lsend_core::receive;
-use lsend_core::events::ReceiveEvent;
 
 use crate::state::UiEvent;
 

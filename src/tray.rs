@@ -255,7 +255,8 @@ fn png_dimensions(png: &[u8]) -> Result<(u32, u32)> {
 }
 
 fn decode_png_to_icon(png: &[u8], label: &str) -> Result<Icon> {
-    let (width, height, rgba) = decode_tray_icon_png(png).with_context(|| format!("decode {label}"))?;
+    let (width, height, rgba) =
+        decode_tray_icon_png(png).with_context(|| format!("decode {label}"))?;
     Ok(Icon::from_rgba(rgba, width, height)?)
 }
 
@@ -529,8 +530,14 @@ mod tests {
         assert_eq!(icons.sending.len(), SEND_FRAME_PNGS.len());
         assert_eq!(icons.receiving.len(), RECEIVE_FRAME_PNGS.len());
         let expected = png_dimensions(TRAY_ICON_PNG).expect("tray icon dimensions");
-        assert_eq!(png_dimensions(SEND_FRAME_2_PNG).expect("send frame 2"), expected);
-        assert_eq!(png_dimensions(RECEIVE_FRAME_2_PNG).expect("receive frame 2"), expected);
+        assert_eq!(
+            png_dimensions(SEND_FRAME_2_PNG).expect("send frame 2"),
+            expected
+        );
+        assert_eq!(
+            png_dimensions(RECEIVE_FRAME_2_PNG).expect("receive frame 2"),
+            expected
+        );
     }
 
     #[test]
