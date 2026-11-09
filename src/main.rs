@@ -2,7 +2,10 @@
 //!
 //! No main window. The receiver is resident (started at launch, never tied to
 //! a UI tab); sends are initiated from the tray menu's "Send file to…"
-//! submenu via a native file picker. macOS menu bar / Windows system tray.
+//! submenu via a native file picker. Platform integrations are cfg-gated:
+//! macOS runs as a menu-bar app (built and shipped); the tray/notification
+//! code for other desktops compiles behind cfg flags but is not built or
+//! tested here yet.
 //!
 //! Threading layout:
 //! - **Main thread**: tao event loop + tray icon. Menu actions and background
@@ -20,10 +23,9 @@ use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
 use anyhow::Result;
 use notify_rust::Notification;
 use parking_lot::Mutex;
-use tao::{
-    event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
-    platform::macos::{ActivationPolicy, EventLoopExtMacOS},
-};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
+#[cfg(target_os = "macos")]
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tokio::runtime::Runtime;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -69,9 +71,11 @@ fn main() -> Result<()> {
     // Build tao event loop with a custom user-event type so background tasks
     // can wake the loop via the EventLoopProxy.
     let mut event_loop_builder = EventLoopBuilder::<UiEvent>::with_user_event();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut event_loop: EventLoop<UiEvent> = event_loop_builder.build();
     // Tray-only: hide from the macOS Dock, don't grab focus on launch.
-    // (No-op on Windows / Linux.)
+    // (macOS-only API; other platforms have no equivalent to set.)
+    #[cfg(target_os = "macos")]
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
     let proxy = event_loop.create_proxy();
     let menu_proxy = proxy.clone();
@@ -265,6 +269,11 @@ fn main() -> Result<()> {
                             let mut guard = last_message_ref.lock();
                             *guard = Some(text.clone());
                             rebuild = true;
+                        }
+                        ReceiveEvent::TransferRejected { sender_alias, .. } => {
+                            notify_status(&format!(
+                                "Rejected transfer from {sender_alias} (not paired)"
+                            ));
                         }
                         _ => {}
                     }
@@ -540,6 +549,10 @@ fn handle_receive_event(
         ReceiveEvent::TransferCancelled => {
             notify_state.reset();
         }
+        ReceiveEvent::TransferRejected { .. } => {
+            // Notified directly from the event-loop arm; no state to update
+            // because no session was created.
+        }
         ReceiveEvent::PeerDiscovered(_) => {}
         ReceiveEvent::Shutdown => {
             // Supervisor will surface any error separately via ReceiverError.
@@ -607,7 +620,14 @@ fn handle_send_file(
         .await;
 
         let payload = match result {
-            Ok(_) => Ok(format!("{} file(s) to {}", count, device_label)),
+            Ok(outcome) => match outcome {
+                lsend_core::send::SendOutcome::Delivered => {
+                    Ok(format!("{} file(s) to {}", count, device_label))
+                }
+                lsend_core::send::SendOutcome::FailedFiles(failed) => Err(format!(
+                    "{failed} of {count} file(s) failed to upload to {device_label}"
+                )),
+            },
             Err(e) => Err(format!("{e:#}")),
         };
         let _ = proxy.send_event(UiEvent::TransferEnded);
@@ -665,7 +685,14 @@ fn handle_send_text(
         .await;
 
         let payload = match result {
-            Ok(_) => Ok(format!("message to {}", device.alias)),
+            Ok(outcome) => match outcome {
+                lsend_core::send::SendOutcome::Delivered => {
+                    Ok(format!("message to {}", device.alias))
+                }
+                lsend_core::send::SendOutcome::FailedFiles(_) => {
+                    Err("message delivery failed".to_string())
+                }
+            },
             Err(e) => Err(format!("{e:#}")),
         };
         let _ = proxy.send_event(UiEvent::TransferEnded);
