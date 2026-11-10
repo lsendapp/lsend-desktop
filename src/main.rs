@@ -620,14 +620,7 @@ fn handle_send_file(
         .await;
 
         let payload = match result {
-            Ok(outcome) => match outcome {
-                lsend_core::send::SendOutcome::Delivered => {
-                    Ok(format!("{} file(s) to {}", count, device_label))
-                }
-                lsend_core::send::SendOutcome::FailedFiles(failed) => Err(format!(
-                    "{failed} of {count} file(s) failed to upload to {device_label}"
-                )),
-            },
+            Ok(outcome) => describe_file_outcome(outcome, count, &device_label),
             Err(e) => Err(format!("{e:#}")),
         };
         let _ = proxy.send_event(UiEvent::TransferEnded);
@@ -685,19 +678,42 @@ fn handle_send_text(
         .await;
 
         let payload = match result {
-            Ok(outcome) => match outcome {
-                lsend_core::send::SendOutcome::Delivered => {
-                    Ok(format!("message to {}", device.alias))
-                }
-                lsend_core::send::SendOutcome::FailedFiles(_) => {
-                    Err("message delivery failed".to_string())
-                }
-            },
+            Ok(outcome) => describe_message_outcome(outcome, &device.alias),
             Err(e) => Err(format!("{e:#}")),
         };
         let _ = proxy.send_event(UiEvent::TransferEnded);
         let _ = proxy.send_event(UiEvent::SendResult(payload));
     });
+}
+
+/// Map a finished file send to the tray notification payload: a delivered
+/// outcome is a success, and any failed upload is an error even when the
+/// other files finished.
+fn describe_file_outcome(
+    outcome: lsend_core::send::SendOutcome,
+    count: usize,
+    device_label: &str,
+) -> Result<String, String> {
+    match outcome {
+        lsend_core::send::SendOutcome::Delivered => {
+            Ok(format!("{count} file(s) to {device_label}"))
+        }
+        lsend_core::send::SendOutcome::FailedFiles(failed) => Err(format!(
+            "{failed} of {count} file(s) failed to upload to {device_label}"
+        )),
+    }
+}
+
+/// Same mapping for message sends, where any failed upload means the whole
+/// message was not delivered.
+fn describe_message_outcome(
+    outcome: lsend_core::send::SendOutcome,
+    device_alias: &str,
+) -> Result<String, String> {
+    match outcome {
+        lsend_core::send::SendOutcome::Delivered => Ok(format!("message to {device_alias}")),
+        lsend_core::send::SendOutcome::FailedFiles(_) => Err("message delivery failed".to_string()),
+    }
 }
 
 fn find_device(
@@ -759,6 +775,7 @@ fn notify_error(body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsend_core::send::SendOutcome;
 
     #[test]
     fn sending_does_not_hide_paused_receivers_resume_action() {
@@ -776,6 +793,30 @@ mod tests {
         assert_eq!(
             menu_receiver_status(ReceiverStatus::Paused, &animator),
             ReceiverStatus::Paused
+        );
+    }
+
+    #[test]
+    fn file_outcome_reports_partial_upload_failure() {
+        assert_eq!(
+            describe_file_outcome(SendOutcome::Delivered, 3, "Laptop"),
+            Ok("3 file(s) to Laptop".to_string())
+        );
+        assert_eq!(
+            describe_file_outcome(SendOutcome::FailedFiles(2), 3, "Laptop"),
+            Err("2 of 3 file(s) failed to upload to Laptop".to_string())
+        );
+    }
+
+    #[test]
+    fn message_outcome_reports_any_failure_as_error() {
+        assert_eq!(
+            describe_message_outcome(SendOutcome::Delivered, "Laptop"),
+            Ok("message to Laptop".to_string())
+        );
+        assert_eq!(
+            describe_message_outcome(SendOutcome::FailedFiles(1), "Laptop"),
+            Err("message delivery failed".to_string())
         );
     }
 }
