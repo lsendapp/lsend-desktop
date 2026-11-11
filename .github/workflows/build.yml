@@ -34,7 +34,7 @@ concurrency:
 jobs:
   build-macos:
     name: Build macOS (universal)
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
@@ -75,12 +75,12 @@ jobs:
           echo "Resolved version: $VERSION"
 
       - name: Checkout desktop repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: desktop
 
       - name: Checkout CLI repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: lsendapp/cli
           path: cli
